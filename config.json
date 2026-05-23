@@ -23,6 +23,19 @@
           "read_only": true
         }
       ],
+      "interfaces": [
+        {
+          "name": "eth0",
+          "network": "podman",
+          "ip_address": "10.88.0.10",
+          "subnet": "10.88.0.0/16",
+          "gateway": "10.88.0.1",
+          "dns": [
+            "1.1.1.1",
+            "8.8.8.8"
+          ]
+        }
+      ],
       "restart": "always"
     }
   ]

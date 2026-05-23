@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"time"
 
@@ -30,13 +31,23 @@ type Config struct {
 }
 
 type ContainerConfig struct {
-	Name    string            `json:"name"`
-	Image   string            `json:"image"`
-	Env     map[string]string `json:"env"`
-	Ports   []PortConfig      `json:"ports"`
-	Volumes []VolumeConfig    `json:"volumes"`
-	Command []string          `json:"command"`
-	Restart string            `json:"restart"`
+	Name       string            `json:"name"`
+	Image      string            `json:"image"`
+	Env        map[string]string `json:"env"`
+	Ports      []PortConfig      `json:"ports"`
+	Volumes    []VolumeConfig    `json:"volumes"`
+	Interfaces []InterfaceConfig `json:"interfaces"`
+	Command    []string          `json:"command"`
+	Restart    string            `json:"restart"`
+}
+
+type InterfaceConfig struct {
+	Name      string   `json:"name"`
+	Network   string   `json:"network"`
+	IPAddress string   `json:"ip_address"`
+	Subnet    string   `json:"subnet"`
+	Gateway   string   `json:"gateway"`
+	DNS       []string `json:"dns"`
 }
 
 type PortConfig struct {
@@ -246,6 +257,63 @@ func createSpec(c ContainerConfig) (*specgen.SpecGenerator, error) {
 			Destination: v.ContainerPath,
 			Options:     options,
 		})
+	}
+
+	if len(c.Interfaces) > 0 {
+		s.Networks = make(map[string]nettypes.PerNetworkOptions, len(c.Interfaces))
+		dnsServers := make([]net.IP, 0)
+
+		for _, iface := range c.Interfaces {
+			networkName := iface.Network
+			if networkName == "" {
+				networkName = "podman"
+			}
+
+			network := s.Networks[networkName]
+			if iface.Name != "" {
+				network.InterfaceName = iface.Name
+			}
+
+			if iface.IPAddress != "" {
+				ip := net.ParseIP(iface.IPAddress)
+				if ip == nil {
+					return nil, fmt.Errorf("invalid ip_address %q for container %q interface %q", iface.IPAddress, c.Name, iface.Name)
+				}
+				network.StaticIPs = append(network.StaticIPs, ip)
+			}
+
+			if iface.Subnet != "" {
+				if network.Options == nil {
+					network.Options = map[string]string{}
+				}
+				network.Options["subnet"] = iface.Subnet
+			}
+
+			if iface.Gateway != "" {
+				gateway := net.ParseIP(iface.Gateway)
+				if gateway == nil {
+					return nil, fmt.Errorf("invalid gateway %q for container %q interface %q", iface.Gateway, c.Name, iface.Name)
+				}
+				if network.Options == nil {
+					network.Options = map[string]string{}
+				}
+				network.Options["gateway"] = gateway.String()
+			}
+
+			for _, dns := range iface.DNS {
+				dnsIP := net.ParseIP(dns)
+				if dnsIP == nil {
+					return nil, fmt.Errorf("invalid dns server %q for container %q interface %q", dns, c.Name, iface.Name)
+				}
+				dnsServers = append(dnsServers, dnsIP)
+			}
+
+			s.Networks[networkName] = network
+		}
+
+		if len(dnsServers) > 0 {
+			s.DNSServers = dnsServers
+		}
 	}
 
 	if c.Restart != "" {

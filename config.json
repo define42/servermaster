@@ -19,6 +19,16 @@
       ]
     }
   ],
+  "ostree": {
+    "upload_path": "/data/ostree/update.tar",
+    "apply_command": [
+      "bootc",
+      "switch",
+      "--transport",
+      "oci-archive",
+      "/data/ostree/update.tar"
+    ]
+  },
   "firewall_ports": [
     {
       "zone": "public",

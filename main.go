@@ -33,8 +33,9 @@ const (
 	PodmanRootful  PodmanMode = "rootful"
 	PodmanRootless PodmanMode = "rootless"
 
-	defaultConfigPath = "/data/config/containers.json"
-	webServerAddress  = ":8080"
+	defaultConfigPath       = "/data/config/containers.json"
+	webServerAddress        = ":8080"
+	defaultOstreeUploadPath = "/data/ostree/update.tar"
 
 	serviceName       = "servermaster.service"
 	serviceBinaryPath = "/usr/local/bin/servermaster"
@@ -50,6 +51,12 @@ type Config struct {
 	Interfaces    []InterfaceConfig    `json:"interfaces"`
 	FirewallPorts []FirewallPortConfig `json:"firewall_ports"`
 	Containers    []ContainerConfig    `json:"containers"`
+	Ostree        *OstreeConfig        `json:"ostree,omitempty"`
+}
+
+type OstreeConfig struct {
+	UploadPath   string   `json:"upload_path"`
+	ApplyCommand []string `json:"apply_command"`
 }
 
 type FolderConfig struct {
@@ -160,14 +167,17 @@ func main() {
 }
 
 func runService(configPath string) error {
-	webServer, webServerErrors, err := startWebServer(webServerAddress)
+	_, webServerErrors, err := startWebServer(webServerAddress, configPath)
 	if err != nil {
 		return err
 	}
 
+	// A reconcile failure is logged but does not exit the process: the unit
+	// is configured with Restart=always/RestartSec=10s, so returning here
+	// would tear down and recreate every container on a tight crash loop.
+	// The web server stays up so the host remains observable.
 	if err := run(configPath); err != nil {
-		_ = webServer.Close()
-		return err
+		log.Printf("reconcile failed: %v", err)
 	}
 
 	if err := <-webServerErrors; err != nil {
@@ -177,7 +187,7 @@ func runService(configPath string) error {
 	return nil
 }
 
-func startWebServer(address string) (*http.Server, <-chan error, error) {
+func startWebServer(address string, configPath string) (*http.Server, <-chan error, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
@@ -191,6 +201,12 @@ func startWebServer(address string) (*http.Server, <-chan error, error) {
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		fmt.Fprintln(w, "ok")
+	})
+	mux.HandleFunc("/ostree/upload", func(w http.ResponseWriter, r *http.Request) {
+		handleOstreeUpload(w, r, configPath)
+	})
+	mux.HandleFunc("/ostree/upgrade", func(w http.ResponseWriter, r *http.Request) {
+		handleOstreeUpgrade(w, r, configPath)
 	})
 
 	listener, err := net.Listen("tcp", address)
@@ -215,6 +231,122 @@ func startWebServer(address string) (*http.Server, <-chan error, error) {
 
 	log.Printf("webserver listening on %s", address)
 	return server, errCh, nil
+}
+
+// handleOstreeUpload streams the request body to the configured upload path.
+// The body is written to a temp file in the destination directory and then
+// renamed into place so a partial upload can never be applied. The endpoint is
+// unauthenticated: anyone who can reach :8080 can replace the staged image.
+func handleOstreeUpload(w http.ResponseWriter, r *http.Request, configPath string) {
+	if r.Method != http.MethodPost && r.Method != http.MethodPut {
+		w.Header().Set("Allow", "POST, PUT")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	defer r.Body.Close()
+
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("load config: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	dest := ostreeUploadPath(cfg)
+	dir := filepath.Dir(dest)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		http.Error(w, fmt.Sprintf("create upload dir: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	tmp, err := os.CreateTemp(dir, ".upload-*")
+	if err != nil {
+		http.Error(w, fmt.Sprintf("create temp file: %v", err), http.StatusInternalServerError)
+		return
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // best-effort; a no-op once the rename succeeds
+
+	written, copyErr := io.Copy(tmp, r.Body)
+	closeErr := tmp.Close()
+	if copyErr != nil {
+		http.Error(w, fmt.Sprintf("write upload: %v", copyErr), http.StatusInternalServerError)
+		return
+	}
+	if closeErr != nil {
+		http.Error(w, fmt.Sprintf("close upload: %v", closeErr), http.StatusInternalServerError)
+		return
+	}
+
+	if err := os.Rename(tmpName, dest); err != nil {
+		http.Error(w, fmt.Sprintf("finalize upload: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("ostree image uploaded to %s (%d bytes)", dest, written)
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	fmt.Fprintf(w, "uploaded %d bytes to %s\n", written, dest)
+}
+
+// handleOstreeUpgrade runs the configured apply command and, unless the request
+// sets ?reboot=false, reboots the host once the command succeeds. The reboot is
+// scheduled after the response is written so the caller gets confirmation. Like
+// the upload endpoint this is unauthenticated.
+func handleOstreeUpgrade(w http.ResponseWriter, r *http.Request, configPath string) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("load config: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	if cfg.Ostree == nil || len(cfg.Ostree.ApplyCommand) == 0 {
+		http.Error(w, "no ostree.apply_command configured", http.StatusBadRequest)
+		return
+	}
+
+	reboot := r.URL.Query().Get("reboot") != "false"
+
+	command := cfg.Ostree.ApplyCommand
+	log.Printf("applying ostree update: %s", strings.Join(command, " "))
+	if err := runCommand(command[0], command[1:]...); err != nil {
+		log.Printf("ostree apply failed: %v", err)
+		http.Error(w, fmt.Sprintf("apply update failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	if !reboot {
+		log.Println("ostree update applied; reboot skipped")
+		fmt.Fprintln(w, "update applied; reboot skipped")
+		return
+	}
+
+	log.Println("ostree update applied; scheduling reboot")
+	fmt.Fprintln(w, "update applied; rebooting")
+	go scheduleReboot()
+}
+
+func ostreeUploadPath(cfg *Config) string {
+	if cfg != nil && cfg.Ostree != nil {
+		if path := strings.TrimSpace(cfg.Ostree.UploadPath); path != "" {
+			return path
+		}
+	}
+	return defaultOstreeUploadPath
+}
+
+// scheduleReboot reboots the host after a short grace period so the HTTP
+// response can be flushed to the caller first.
+func scheduleReboot() {
+	time.Sleep(time.Second)
+	if err := runCommand("systemctl", "reboot"); err != nil {
+		log.Printf("reboot failed: %v", err)
+	}
 }
 
 func run(configPath string) error {
@@ -269,10 +401,16 @@ func run(configPath string) error {
 		return err
 	}
 
+	var reconcileErrors []error
 	for _, c := range cfg.Containers {
 		if err := recreateContainer(ctx, c); err != nil {
-			return err
+			log.Printf("reconcile container %q failed: %v", c.Name, err)
+			reconcileErrors = append(reconcileErrors, err)
 		}
+	}
+
+	if len(reconcileErrors) > 0 {
+		return fmt.Errorf("%d of %d containers failed to reconcile: %w", len(reconcileErrors), len(cfg.Containers), errors.Join(reconcileErrors...))
 	}
 
 	log.Println("all containers started")
@@ -313,6 +451,23 @@ func validateConfig(cfg *Config) error {
 		if len(c.Interfaces) > 0 {
 			return fmt.Errorf("container %q defines interfaces; interfaces configure host interfaces and must be declared at the top level", c.Name)
 		}
+
+		for _, p := range c.Ports {
+			if err := validateContainerPort(p.HostPort); err != nil {
+				return fmt.Errorf("container %q has invalid host_port %d: %w", c.Name, p.HostPort, err)
+			}
+			if err := validateContainerPort(p.ContainerPort); err != nil {
+				return fmt.Errorf("container %q has invalid container_port %d: %w", c.Name, p.ContainerPort, err)
+			}
+		}
+	}
+
+	return nil
+}
+
+func validateContainerPort(port int) error {
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("port must be between 1 and 65535")
 	}
 
 	return nil

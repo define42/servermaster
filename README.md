@@ -5,7 +5,7 @@ It starts a small web server on port `8080`, reads a JSON config file, ensures e
 
 ## How it works
 
-1. Starts a web server on `:8080` with `/healthz`.
+1. Starts a web server on `:8080` with `/healthz` and the OS-update endpoints (see [OS updates](#os-updates)).
 2. Reads container definitions from the configured JSON file.
 3. Ensures any declared host folders exist with the configured mode and owner.
 4. Applies any host interface configuration declared in the config file.
@@ -35,6 +35,21 @@ This writes `/etc/systemd/system/servermaster.service`, enables it, and starts i
 The unit runs `/usr/local/bin/servermaster -config ...` as `root`.
 The process stays running as the web server on port `8080`.
 
+## OS updates
+
+The web server exposes two endpoints for staging and applying an OS image (an ostree/bootc update tarball):
+
+- `POST /ostree/upload` streams the request body to `ostree.upload_path`. The body is written to a temporary file and renamed into place, so an interrupted upload is never left where the apply command would pick it up.
+- `POST /ostree/upgrade` runs `ostree.apply_command` and then reboots the host once it succeeds. Pass `?reboot=false` to apply without rebooting (useful for testing). Returns `400` if no `apply_command` is configured.
+
+```sh
+# Stage the image, then apply it and reboot.
+curl --data-binary @update.tar http://node:8080/ostree/upload
+curl -X POST http://node:8080/ostree/upgrade
+```
+
+> **Security:** these endpoints are unauthenticated. Anyone who can reach `:8080` can replace the OS image and reboot the host. Only expose this port on a trusted, isolated management network (for example, restrict it with `firewall_ports`/`interfaces` or a host firewall).
+
 ## Configuration
 
 Top-level fields in the JSON file:
@@ -44,6 +59,7 @@ Top-level fields in the JSON file:
 - `interfaces`: optional list of host network interface settings
 - `firewall_ports`: optional list of firewalld runtime ports to open
 - `containers`: list of container definitions
+- `ostree`: optional OS-update settings used by the `/ostree/*` endpoints
 
 ### Folder object
 
@@ -68,6 +84,11 @@ Firewall ports are opened with `github.com/godbus/dbus/v5` against firewalld's r
 - `zone`: optional firewalld zone (empty uses the default zone)
 - `port`: port or port range as a string (for example `8080` or `8000-8010`)
 - `protocol`: protocol (`tcp` default; supports `tcp`, `udp`, `sctp`, and `dccp`)
+
+### Ostree object
+
+- `upload_path`: where `/ostree/upload` writes the uploaded image (default `/data/ostree/update.tar`)
+- `apply_command`: argv list run by `/ostree/upgrade` to apply the staged image (for example `["bootc", "switch", "--transport", "oci-archive", "/data/ostree/update.tar"]`)
 
 ### Container fields
 

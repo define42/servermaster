@@ -1,0 +1,29 @@
+{
+  "podman_mode": "rootful",
+  "containers": [
+    {
+      "name": "web",
+      "image": "docker.io/library/nginx:latest",
+      "env": {
+        "TZ": "Europe/Copenhagen",
+        "LOG_LEVEL": "info"
+      },
+      "ports": [
+        {
+          "host_ip": "0.0.0.0",
+          "host_port": 8080,
+          "container_port": 80,
+          "protocol": "tcp"
+        }
+      ],
+      "volumes": [
+        {
+          "host_path": "/data/web",
+          "container_path": "/usr/share/nginx/html",
+          "read_only": true
+        }
+      ],
+      "restart": "always"
+    }
+  ]
+}

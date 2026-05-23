@@ -196,11 +196,11 @@ func startWebServer(address string, configPath string) (*http.Server, <-chan err
 		}
 
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		fmt.Fprintln(w, "servermaster running")
+		_, _ = fmt.Fprintln(w, "servermaster running")
 	})
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		fmt.Fprintln(w, "ok")
+		_, _ = fmt.Fprintln(w, "ok")
 	})
 	mux.HandleFunc("/ostree/upload", func(w http.ResponseWriter, r *http.Request) {
 		handleOstreeUpload(w, r, configPath)
@@ -243,7 +243,7 @@ func handleOstreeUpload(w http.ResponseWriter, r *http.Request, configPath strin
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 
 	cfg, err := loadConfig(configPath)
 	if err != nil {
@@ -264,7 +264,7 @@ func handleOstreeUpload(w http.ResponseWriter, r *http.Request, configPath strin
 		return
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName) // best-effort; a no-op once the rename succeeds
+	defer func() { _ = os.Remove(tmpName) }() // best-effort; a no-op once the rename succeeds
 
 	written, copyErr := io.Copy(tmp, r.Body)
 	closeErr := tmp.Close()
@@ -284,7 +284,7 @@ func handleOstreeUpload(w http.ResponseWriter, r *http.Request, configPath strin
 
 	log.Printf("ostree image uploaded to %s (%d bytes)", dest, written)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	fmt.Fprintf(w, "uploaded %d bytes to %s\n", written, dest)
+	_, _ = fmt.Fprintf(w, "uploaded %d bytes to %s\n", written, dest)
 }
 
 // handleOstreeUpgrade runs the configured apply command and, unless the request
@@ -322,12 +322,12 @@ func handleOstreeUpgrade(w http.ResponseWriter, r *http.Request, configPath stri
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	if !reboot {
 		log.Println("ostree update applied; reboot skipped")
-		fmt.Fprintln(w, "update applied; reboot skipped")
+		_, _ = fmt.Fprintln(w, "update applied; reboot skipped")
 		return
 	}
 
 	log.Println("ostree update applied; scheduling reboot")
-	fmt.Fprintln(w, "update applied; rebooting")
+	_, _ = fmt.Fprintln(w, "update applied; rebooting")
 	go scheduleReboot()
 }
 
@@ -725,7 +725,7 @@ func configureFirewallPorts(ports []FirewallPortConfig) error {
 	if err != nil {
 		return fmt.Errorf("connect to system bus failed: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	firewalld := conn.Object(firewalldBusName, dbus.ObjectPath(firewalldObjectPath))
 	for _, port := range ports {
@@ -927,7 +927,7 @@ func pullImage(ctx context.Context, rawImage string) error {
 	if err != nil {
 		return err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 
 	if !response.IsSuccess() {
 		return response.Process(nil)
@@ -1003,7 +1003,7 @@ func listContainers(ctx context.Context) ([]listedContainer, error) {
 	if err != nil {
 		return containers, err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 
 	return containers, response.Process(&containers)
 }
@@ -1047,7 +1047,7 @@ func containerExists(ctx context.Context, nameOrID string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 
 	if response.IsSuccess() {
 		return true, nil
@@ -1072,7 +1072,7 @@ func stopContainer(ctx context.Context, nameOrID string) error {
 	if err != nil {
 		return err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 
 	return response.Process(nil)
 }
@@ -1090,7 +1090,7 @@ func removeContainer(ctx context.Context, nameOrID string) error {
 	if err != nil {
 		return err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 
 	return response.Process(nil)
 }
@@ -1115,7 +1115,7 @@ func createContainer(ctx context.Context, spec *containerSpec) (containerCreateR
 	if err != nil {
 		return created, err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 
 	return created, response.Process(&created)
 }
@@ -1130,7 +1130,7 @@ func startContainer(ctx context.Context, nameOrID string) error {
 	if err != nil {
 		return err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 
 	return response.Process(nil)
 }

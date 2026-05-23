@@ -1,0 +1,23 @@
+# govulncheck allowlist
+#
+# Advisory IDs listed here are EXCLUDED from failing the govulncheck CI job.
+# Everything else that govulncheck reports as "called" by our code still fails
+# the build. Keep this list as small as possible and document the reason for
+# every entry, including a link to the advisory.
+#
+# Format: one advisory ID per line. Inline "# comment" after the ID is ignored.
+
+# GO-2024-3042 (CVE-2024-3056): Podman memory-based denial of service.
+# Affects ALL versions of github.com/containers/podman/v5 with NO fixed
+# version available, and lists no specific affected symbols, so govulncheck
+# flags any use of the module. We only import the pkg/bindings HTTP client and
+# never run the affected daemon code path. Revisit if upstream ships a fix.
+# https://pkg.go.dev/vuln/GO-2024-3042
+GO-2024-3042
+
+# GO-2025-3961 (CVE-2025-4953): Podman creates a temporary file with insecure
+# permissions. Same situation as above: all versions affected, no fix
+# available, no specific affected symbols, and the affected code is not in the
+# pkg/bindings client we use. Revisit if upstream ships a fix.
+# https://pkg.go.dev/vuln/GO-2025-3961
+GO-2025-3961

@@ -30,8 +30,6 @@ jobs:
           check-latest: true
 
       - name: Run govulncheck
-        uses: golang/govulncheck-action@v1
-        with:
-          go-version-file: go.mod
-          go-package: ./...
-          repo-checkout: false
+        # Shared with the `govulncheck` makefile target so local and CI runs
+        # apply the same allowlist gate (.github/govulncheck-allowlist.txt).
+        run: ./scripts/govulncheck-gate.sh

@@ -118,6 +118,12 @@ type imagePullReport struct {
 	ID     string   `json:"id"`
 }
 
+type listedContainer struct {
+	ID    string   `json:"Id"`
+	Names []string `json:"Names"`
+	State string   `json:"State"`
+}
+
 func main() {
 	configPath := flag.String("config", defaultConfigPath, "path to config JSON file")
 	flag.Parse()
@@ -162,6 +168,10 @@ func main() {
 
 	ctx, err = bindings.NewConnection(ctx, "unix:"+socketPath)
 	if err != nil {
+		log.Fatal(err)
+	}
+
+	if err := stopUnmanagedContainers(ctx, cfg.Containers); err != nil {
 		log.Fatal(err)
 	}
 
@@ -523,6 +533,84 @@ func pullImage(ctx context.Context, rawImage string) error {
 	return errors.Join(pullErrors...)
 }
 
+func stopUnmanagedContainers(ctx context.Context, configured []ContainerConfig) error {
+	configuredNames := make(map[string]struct{}, len(configured))
+	for _, c := range configured {
+		configuredNames[c.Name] = struct{}{}
+	}
+
+	existing, err := listContainers(ctx)
+	if err != nil {
+		return fmt.Errorf("list containers failed: %w", err)
+	}
+
+	for _, container := range existing {
+		if containerIsConfigured(container, configuredNames) || !containerNeedsStop(container.State) {
+			continue
+		}
+
+		if container.ID == "" {
+			return fmt.Errorf("cannot stop unmanaged container %q: missing id", containerDisplayName(container))
+		}
+
+		if err := stopContainer(ctx, container.ID); err != nil {
+			return fmt.Errorf("stop unmanaged container %q failed: %w", containerDisplayName(container), err)
+		}
+
+		log.Printf("stopped unmanaged container %s", containerDisplayName(container))
+	}
+
+	return nil
+}
+
+func listContainers(ctx context.Context) ([]listedContainer, error) {
+	conn, err := bindings.GetClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	params := url.Values{}
+	params.Set("all", "true")
+
+	var containers []listedContainer
+	response, err := conn.DoRequest(ctx, nil, http.MethodGet, "/containers/json", params, nil)
+	if err != nil {
+		return containers, err
+	}
+	defer response.Body.Close()
+
+	return containers, response.Process(&containers)
+}
+
+func containerIsConfigured(container listedContainer, configuredNames map[string]struct{}) bool {
+	for _, name := range container.Names {
+		if _, exists := configuredNames[name]; exists {
+			return true
+		}
+	}
+
+	return false
+}
+
+func containerNeedsStop(state string) bool {
+	switch strings.ToLower(state) {
+	case "created", "configured", "dead", "exited", "removing", "stopped":
+		return false
+	default:
+		return true
+	}
+}
+
+func containerDisplayName(container listedContainer) string {
+	if len(container.Names) > 0 {
+		return container.Names[0]
+	}
+	if container.ID != "" {
+		return container.ID
+	}
+	return "<unknown>"
+}
+
 func containerExists(ctx context.Context, nameOrID string) (bool, error) {
 	conn, err := bindings.GetClient(ctx)
 	if err != nil {
@@ -543,6 +631,24 @@ func containerExists(ctx context.Context, nameOrID string) (bool, error) {
 	}
 
 	return false, response.Process(nil)
+}
+
+func stopContainer(ctx context.Context, nameOrID string) error {
+	conn, err := bindings.GetClient(ctx)
+	if err != nil {
+		return err
+	}
+
+	params := url.Values{}
+	params.Set("ignore", "true")
+
+	response, err := conn.DoRequest(ctx, nil, http.MethodPost, "/containers/%s/stop", params, nil, nameOrID)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+
+	return response.Process(nil)
 }
 
 func removeContainer(ctx context.Context, nameOrID string) error {

@@ -10,9 +10,10 @@ It reads a JSON config file, ensures each declared container is recreated with t
 3. Applies any host interface configuration declared in the config file.
 4. Starts `podman.socket` using systemd (`rootful` or `rootless` mode).
 5. Waits for the Podman Unix socket to become reachable.
-6. Pulls each image.
-7. Removes any existing container with the same name.
-8. Creates and starts the container from the declared spec.
+6. Stops any running containers that are not declared in the config file.
+7. Pulls each image.
+8. Removes any existing container with the same name.
+9. Creates and starts the container from the declared spec.
 
 ## Usage
 

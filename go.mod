@@ -5,7 +5,7 @@ go 1.26.2
 require (
 	github.com/containers/podman/v5 v5.8.2
 	github.com/coreos/go-systemd/v22 v22.7.0
-	github.com/godbus/dbus/v5 v5.1.1-0.20241109141217-c266b19b28e9
+	github.com/godbus/dbus/v5 v5.2.2
 	github.com/vishvananda/netlink v1.3.1
 )
 

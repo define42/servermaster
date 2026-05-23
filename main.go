@@ -1,24 +1,25 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
+	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
 	"time"
 
-	nettypes "github.com/containers/common/libnetwork/types"
 	"github.com/containers/podman/v5/pkg/bindings"
-	"github.com/containers/podman/v5/pkg/bindings/containers"
-	"github.com/containers/podman/v5/pkg/bindings/images"
-	"github.com/containers/podman/v5/pkg/specgen"
 	systemd "github.com/coreos/go-systemd/v22/dbus"
-	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/vishvananda/netlink"
 )
 
 type PodmanMode string
@@ -64,6 +65,43 @@ type VolumeConfig struct {
 	HostPath      string `json:"host_path"`
 	ContainerPath string `json:"container_path"`
 	ReadOnly      bool   `json:"read_only"`
+}
+
+type containerSpec struct {
+	Name          string            `json:"name,omitempty"`
+	Image         string            `json:"image"`
+	Env           map[string]string `json:"env,omitempty"`
+	Command       []string          `json:"command,omitempty"`
+	PortMappings  []portMapping     `json:"portmappings,omitempty"`
+	Mounts        []mount           `json:"mounts,omitempty"`
+	RestartPolicy string            `json:"restart_policy,omitempty"`
+}
+
+type portMapping struct {
+	HostIP        string `json:"host_ip"`
+	ContainerPort uint16 `json:"container_port"`
+	HostPort      uint16 `json:"host_port"`
+	Range         uint16 `json:"range"`
+	Protocol      string `json:"protocol"`
+}
+
+type mount struct {
+	Destination string   `json:"destination"`
+	Type        string   `json:"type,omitempty"`
+	Source      string   `json:"source,omitempty"`
+	Options     []string `json:"options,omitempty"`
+}
+
+type containerCreateResponse struct {
+	ID       string   `json:"Id"`
+	Warnings []string `json:"Warnings"`
+}
+
+type imagePullReport struct {
+	Stream string   `json:"stream"`
+	Error  string   `json:"error"`
+	Images []string `json:"images"`
+	ID     string   `json:"id"`
 }
 
 func main() {
@@ -211,31 +249,27 @@ func recreateContainer(ctx context.Context, c ContainerConfig) error {
 		return err
 	}
 
-	_, err = images.Pull(ctx, c.Image, nil)
-	if err != nil {
+	if err := pullImage(ctx, c.Image); err != nil {
 		return fmt.Errorf("pull image %q failed: %w", c.Image, err)
 	}
 
-	exists, err := containers.Exists(ctx, c.Name, nil)
+	exists, err := containerExists(ctx, c.Name)
 	if err != nil {
 		return fmt.Errorf("check container %q failed: %w", c.Name, err)
 	}
 
 	if exists {
-		_, err = containers.Remove(ctx, c.Name, &containers.RemoveOptions{
-			Force: pointer(true),
-		})
-		if err != nil {
+		if err := removeContainer(ctx, c.Name); err != nil {
 			return fmt.Errorf("remove container %q failed: %w", c.Name, err)
 		}
 	}
 
-	created, err := containers.CreateWithSpec(ctx, spec, nil)
+	created, err := createContainer(ctx, spec)
 	if err != nil {
 		return fmt.Errorf("create container %q failed: %w", c.Name, err)
 	}
 
-	if err := containers.Start(ctx, created.ID, nil); err != nil {
+	if err := startContainer(ctx, created.ID); err != nil {
 		return fmt.Errorf("start container %q failed: %w", c.Name, err)
 	}
 
@@ -243,11 +277,13 @@ func recreateContainer(ctx context.Context, c ContainerConfig) error {
 	return nil
 }
 
-func createSpec(c ContainerConfig) (*specgen.SpecGenerator, error) {
-	s := specgen.NewSpecGenerator(c.Image, false)
-	s.Name = c.Name
-	s.Env = c.Env
-	s.Command = c.Command
+func createSpec(c ContainerConfig) (*containerSpec, error) {
+	s := &containerSpec{
+		Name:    c.Name,
+		Image:   c.Image,
+		Env:     c.Env,
+		Command: c.Command,
+	}
 
 	for _, p := range c.Ports {
 		proto := p.Protocol
@@ -255,7 +291,7 @@ func createSpec(c ContainerConfig) (*specgen.SpecGenerator, error) {
 			proto = "tcp"
 		}
 
-		s.PortMappings = append(s.PortMappings, nettypes.PortMapping{
+		s.PortMappings = append(s.PortMappings, portMapping{
 			HostIP:        p.HostIP,
 			HostPort:      uint16(p.HostPort),
 			ContainerPort: uint16(p.ContainerPort),
@@ -272,7 +308,7 @@ func createSpec(c ContainerConfig) (*specgen.SpecGenerator, error) {
 			options = append(options, "rw")
 		}
 
-		s.Mounts = append(s.Mounts, specs.Mount{
+		s.Mounts = append(s.Mounts, mount{
 			Type:        "bind",
 			Source:      v.HostPath,
 			Destination: v.ContainerPath,
@@ -287,8 +323,129 @@ func createSpec(c ContainerConfig) (*specgen.SpecGenerator, error) {
 	return s, nil
 }
 
-func pointer[T any](v T) *T {
-	return &v
+func pullImage(ctx context.Context, rawImage string) error {
+	conn, err := bindings.GetClient(ctx)
+	if err != nil {
+		return err
+	}
+
+	params := url.Values{}
+	params.Set("reference", rawImage)
+
+	response, err := conn.DoRequest(ctx, nil, http.MethodPost, "/images/pull", params, nil)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+
+	if !response.IsSuccess() {
+		return response.Process(nil)
+	}
+
+	var pullErrors []error
+	decoder := json.NewDecoder(response.Body)
+	for {
+		var report imagePullReport
+		if err := decoder.Decode(&report); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			pullErrors = append(pullErrors, fmt.Errorf("failed to decode image pull response: %w", err))
+			break
+		}
+
+		switch {
+		case report.Stream != "":
+			fmt.Fprint(os.Stderr, report.Stream)
+		case report.Error != "":
+			pullErrors = append(pullErrors, errors.New(report.Error))
+		case len(report.Images) > 0 || report.ID != "":
+		default:
+			pullErrors = append(pullErrors, fmt.Errorf("unexpected image pull response: %+v", report))
+		}
+	}
+
+	return errors.Join(pullErrors...)
+}
+
+func containerExists(ctx context.Context, nameOrID string) (bool, error) {
+	conn, err := bindings.GetClient(ctx)
+	if err != nil {
+		return false, err
+	}
+
+	response, err := conn.DoRequest(ctx, nil, http.MethodGet, "/containers/%s/exists", nil, nil, nameOrID)
+	if err != nil {
+		return false, err
+	}
+	defer response.Body.Close()
+
+	if response.IsSuccess() {
+		return true, nil
+	}
+	if response.StatusCode == http.StatusNotFound {
+		return false, nil
+	}
+
+	return false, response.Process(nil)
+}
+
+func removeContainer(ctx context.Context, nameOrID string) error {
+	conn, err := bindings.GetClient(ctx)
+	if err != nil {
+		return err
+	}
+
+	params := url.Values{}
+	params.Set("force", "true")
+
+	response, err := conn.DoRequest(ctx, nil, http.MethodDelete, "/containers/%s", params, nil, nameOrID)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+
+	return response.Process(nil)
+}
+
+func createContainer(ctx context.Context, spec *containerSpec) (containerCreateResponse, error) {
+	var created containerCreateResponse
+
+	conn, err := bindings.GetClient(ctx)
+	if err != nil {
+		return created, err
+	}
+
+	body, err := json.Marshal(spec)
+	if err != nil {
+		return created, err
+	}
+
+	headers := http.Header{}
+	headers.Set("Content-Type", "application/json")
+
+	response, err := conn.DoRequest(ctx, bytes.NewReader(body), http.MethodPost, "/containers/create", nil, headers)
+	if err != nil {
+		return created, err
+	}
+	defer response.Body.Close()
+
+	return created, response.Process(&created)
+}
+
+func startContainer(ctx context.Context, nameOrID string) error {
+	conn, err := bindings.GetClient(ctx)
+	if err != nil {
+		return err
+	}
+
+	response, err := conn.DoRequest(ctx, nil, http.MethodPost, "/containers/%s/start", nil, nil, nameOrID)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+
+	return response.Process(nil)
 }
 
 func configureHostInterfaces(interfaces []InterfaceConfig) error {
@@ -302,7 +459,8 @@ func configureHostInterfaces(interfaces []InterfaceConfig) error {
 			return fmt.Errorf("host interface %s is missing name", ifaceLabel)
 		}
 
-		if _, err := net.InterfaceByName(iface.Name); err != nil {
+		link, err := netlink.LinkByName(iface.Name)
+		if err != nil {
 			return fmt.Errorf("host interface %q not found: %w", iface.Name, err)
 		}
 
@@ -311,17 +469,17 @@ func configureHostInterfaces(interfaces []InterfaceConfig) error {
 		}
 
 		if iface.IPAddress != "" {
-			ip, prefixLength, err := parseInterfaceAddress(iface.IPAddress, iface.Subnet)
+			ipNet, err := parseInterfaceAddress(iface.IPAddress, iface.Subnet)
 			if err != nil {
 				return fmt.Errorf("invalid host interface %s address: %w", ifaceLabel, err)
 			}
 
-			if err := runCommand("ip", "addr", "replace", fmt.Sprintf("%s/%d", ip.String(), prefixLength), "dev", iface.Name); err != nil {
+			if err := netlink.AddrReplace(link, &netlink.Addr{IPNet: ipNet}); err != nil {
 				return fmt.Errorf("configure address for host interface %q failed: %w", iface.Name, err)
 			}
 		}
 
-		if err := runCommand("ip", "link", "set", "dev", iface.Name, "up"); err != nil {
+		if err := netlink.LinkSetUp(link); err != nil {
 			return fmt.Errorf("bring up host interface %q failed: %w", iface.Name, err)
 		}
 
@@ -331,12 +489,17 @@ func configureHostInterfaces(interfaces []InterfaceConfig) error {
 				return fmt.Errorf("invalid gateway %q for host interface %s", iface.Gateway, ifaceLabel)
 			}
 
-			args := []string{"route", "replace", "default", "via", gateway.String(), "dev", iface.Name}
+			route := netlink.Route{
+				LinkIndex: link.Attrs().Index,
+				Gw:        gateway,
+			}
 			if gateway.To4() == nil {
-				args = append([]string{"-6"}, args...)
+				route.Family = netlink.FAMILY_V6
+			} else {
+				route.Family = netlink.FAMILY_V4
 			}
 
-			if err := runCommand("ip", args...); err != nil {
+			if err := netlink.RouteReplace(&route); err != nil {
 				return fmt.Errorf("configure default route for host interface %q failed: %w", iface.Name, err)
 			}
 		}
@@ -360,23 +523,22 @@ func configureHostInterfaces(interfaces []InterfaceConfig) error {
 	return nil
 }
 
-func parseInterfaceAddress(address string, subnet string) (net.IP, int, error) {
+func parseInterfaceAddress(address string, subnet string) (*net.IPNet, error) {
 	ip, err := parseAddr(address)
 	if err != nil {
-		return nil, 0, fmt.Errorf("invalid ip_address %q", address)
+		return nil, fmt.Errorf("invalid ip_address %q", address)
 	}
 
 	_, cidr, err := net.ParseCIDR(subnet)
 	if err != nil {
-		return nil, 0, fmt.Errorf("invalid subnet %q: %w", subnet, err)
+		return nil, fmt.Errorf("invalid subnet %q: %w", subnet, err)
 	}
 
 	if !cidr.Contains(ip) {
-		return nil, 0, fmt.Errorf("ip_address %q is not within subnet %q", address, subnet)
+		return nil, fmt.Errorf("ip_address %q is not within subnet %q", address, subnet)
 	}
 
-	ones, _ := cidr.Mask.Size()
-	return ip, ones, nil
+	return &net.IPNet{IP: ip, Mask: cidr.Mask}, nil
 }
 
 func parseAddr(addr string) (net.IP, error) {

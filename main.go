@@ -261,9 +261,15 @@ func createSpec(c ContainerConfig) (*specgen.SpecGenerator, error) {
 
 	if len(c.Interfaces) > 0 {
 		s.Networks = make(map[string]nettypes.PerNetworkOptions, len(c.Interfaces))
-		dnsServers := make([]net.IP, 0)
+		dnsServers := make([]net.IP, 0, len(c.Interfaces)*2)
 
-		for _, iface := range c.Interfaces {
+		for i, iface := range c.Interfaces {
+			// Use an index-based label in error messages when no name is given.
+			ifaceLabel := iface.Name
+			if ifaceLabel == "" {
+				ifaceLabel = fmt.Sprintf("#%d", i)
+			}
+
 			networkName := iface.Network
 			if networkName == "" {
 				networkName = "podman"
@@ -277,22 +283,26 @@ func createSpec(c ContainerConfig) (*specgen.SpecGenerator, error) {
 			if iface.IPAddress != "" {
 				ip := net.ParseIP(iface.IPAddress)
 				if ip == nil {
-					return nil, fmt.Errorf("invalid ip_address %q for container %q interface %q", iface.IPAddress, c.Name, iface.Name)
+					return nil, fmt.Errorf("invalid ip_address %q for container %q interface %s", iface.IPAddress, c.Name, ifaceLabel)
 				}
 				network.StaticIPs = append(network.StaticIPs, ip)
 			}
 
 			if iface.Subnet != "" {
+				_, cidr, err := net.ParseCIDR(iface.Subnet)
+				if err != nil {
+					return nil, fmt.Errorf("invalid subnet %q for container %q interface %s: %w", iface.Subnet, c.Name, ifaceLabel, err)
+				}
 				if network.Options == nil {
 					network.Options = map[string]string{}
 				}
-				network.Options["subnet"] = iface.Subnet
+				network.Options["subnet"] = cidr.String()
 			}
 
 			if iface.Gateway != "" {
 				gateway := net.ParseIP(iface.Gateway)
 				if gateway == nil {
-					return nil, fmt.Errorf("invalid gateway %q for container %q interface %q", iface.Gateway, c.Name, iface.Name)
+					return nil, fmt.Errorf("invalid gateway %q for container %q interface %s", iface.Gateway, c.Name, ifaceLabel)
 				}
 				if network.Options == nil {
 					network.Options = map[string]string{}
@@ -303,7 +313,7 @@ func createSpec(c ContainerConfig) (*specgen.SpecGenerator, error) {
 			for _, dns := range iface.DNS {
 				dnsIP := net.ParseIP(dns)
 				if dnsIP == nil {
-					return nil, fmt.Errorf("invalid dns server %q for container %q interface %q", dns, c.Name, iface.Name)
+					return nil, fmt.Errorf("invalid dns server %q for container %q interface %s", dns, c.Name, ifaceLabel)
 				}
 				dnsServers = append(dnsServers, dnsIP)
 			}

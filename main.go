@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/netip"
 	"os"
 	"time"
 
@@ -275,14 +276,18 @@ func createSpec(c ContainerConfig) (*specgen.SpecGenerator, error) {
 				networkName = "podman"
 			}
 
+			if existingNetwork, exists := s.Networks[networkName]; exists && existingNetwork.InterfaceName != "" && iface.Name != "" && existingNetwork.InterfaceName != iface.Name {
+				return nil, fmt.Errorf("network %q is configured multiple times for container %q with different interfaces (%q and %q); use a unique network per interface so static ip is applied to the correct interface", networkName, c.Name, existingNetwork.InterfaceName, iface.Name)
+			}
+
 			network := s.Networks[networkName]
 			if iface.Name != "" {
 				network.InterfaceName = iface.Name
 			}
 
 			if iface.IPAddress != "" {
-				ip := net.ParseIP(iface.IPAddress)
-				if ip == nil {
+				ip, err := parseAddr(iface.IPAddress)
+				if err != nil {
 					return nil, fmt.Errorf("invalid ip_address %q for container %q interface %s", iface.IPAddress, c.Name, ifaceLabel)
 				}
 				network.StaticIPs = append(network.StaticIPs, ip)
@@ -300,8 +305,8 @@ func createSpec(c ContainerConfig) (*specgen.SpecGenerator, error) {
 			}
 
 			if iface.Gateway != "" {
-				gateway := net.ParseIP(iface.Gateway)
-				if gateway == nil {
+				gateway, err := parseAddr(iface.Gateway)
+				if err != nil {
 					return nil, fmt.Errorf("invalid gateway %q for container %q interface %s", iface.Gateway, c.Name, ifaceLabel)
 				}
 				if network.Options == nil {
@@ -311,8 +316,8 @@ func createSpec(c ContainerConfig) (*specgen.SpecGenerator, error) {
 			}
 
 			for _, dns := range iface.DNS {
-				dnsIP := net.ParseIP(dns)
-				if dnsIP == nil {
+				dnsIP, err := parseAddr(dns)
+				if err != nil {
 					return nil, fmt.Errorf("invalid dns server %q for container %q interface %s", dns, c.Name, ifaceLabel)
 				}
 				dnsServers = append(dnsServers, dnsIP)
@@ -335,4 +340,12 @@ func createSpec(c ContainerConfig) (*specgen.SpecGenerator, error) {
 
 func pointer[T any](v T) *T {
 	return &v
+}
+
+func parseAddr(addr string) (net.IP, error) {
+	parsed, err := netip.ParseAddr(addr)
+	if err != nil {
+		return nil, err
+	}
+	return net.IP(parsed.AsSlice()), nil
 }

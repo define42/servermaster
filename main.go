@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -14,6 +15,8 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	osuser "os/user"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,12 +30,21 @@ type PodmanMode string
 const (
 	PodmanRootful  PodmanMode = "rootful"
 	PodmanRootless PodmanMode = "rootless"
+
+	defaultConfigPath = "/data/config/containers.json"
 )
 
 type Config struct {
 	PodmanMode string            `json:"podman_mode"`
+	Folders    []FolderConfig    `json:"folders"`
 	Interfaces []InterfaceConfig `json:"interfaces"`
 	Containers []ContainerConfig `json:"containers"`
+}
+
+type FolderConfig struct {
+	Path  string `json:"path"`
+	Chmod string `json:"chmod"`
+	User  string `json:"user"`
 }
 
 type ContainerConfig struct {
@@ -107,7 +119,10 @@ type imagePullReport struct {
 }
 
 func main() {
-	cfg, err := loadConfig("/data/config/containers.json")
+	configPath := flag.String("config", defaultConfigPath, "path to config JSON file")
+	flag.Parse()
+
+	cfg, err := loadConfig(*configPath)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -118,6 +133,10 @@ func main() {
 	}
 
 	if err := validateConfig(cfg); err != nil {
+		log.Fatal(err)
+	}
+
+	if err := ensureFolders(cfg.Folders); err != nil {
 		log.Fatal(err)
 	}
 
@@ -177,6 +196,139 @@ func validateConfig(cfg *Config) error {
 	}
 
 	return nil
+}
+
+func ensureFolders(folders []FolderConfig) error {
+	for i, folder := range folders {
+		folderLabel := folder.Path
+		if folderLabel == "" {
+			folderLabel = fmt.Sprintf("#%d", i)
+		}
+
+		if folder.Path == "" {
+			return fmt.Errorf("folder %s is missing path", folderLabel)
+		}
+
+		var mode os.FileMode
+		if folder.Chmod != "" {
+			parsedMode, err := parseFileMode(folder.Chmod)
+			if err != nil {
+				return fmt.Errorf("invalid chmod %q for folder %s: %w", folder.Chmod, folderLabel, err)
+			}
+			mode = parsedMode
+		}
+
+		uid, gid := -1, -1
+		if folder.User != "" {
+			parsedUID, parsedGID, err := parseOwner(folder.User)
+			if err != nil {
+				return fmt.Errorf("invalid user %q for folder %s: %w", folder.User, folderLabel, err)
+			}
+			uid, gid = parsedUID, parsedGID
+		}
+
+		if err := os.MkdirAll(folder.Path, 0o755); err != nil {
+			return fmt.Errorf("create folder %q failed: %w", folder.Path, err)
+		}
+
+		if uid != -1 || gid != -1 {
+			if err := os.Chown(folder.Path, uid, gid); err != nil {
+				return fmt.Errorf("set owner for folder %q failed: %w", folder.Path, err)
+			}
+		}
+
+		if folder.Chmod != "" {
+			if err := os.Chmod(folder.Path, mode); err != nil {
+				return fmt.Errorf("set chmod for folder %q failed: %w", folder.Path, err)
+			}
+		}
+	}
+
+	return nil
+}
+
+func parseFileMode(chmod string) (os.FileMode, error) {
+	cleaned := strings.TrimSpace(chmod)
+	if cleaned == "" {
+		return 0, fmt.Errorf("empty mode")
+	}
+
+	value, err := strconv.ParseUint(cleaned, 8, 32)
+	if err != nil {
+		return 0, err
+	}
+	if value > 0o7777 {
+		return 0, fmt.Errorf("mode exceeds 07777")
+	}
+
+	return os.FileMode(value), nil
+}
+
+func parseOwner(owner string) (int, int, error) {
+	userPart, groupPart, hasGroup := strings.Cut(strings.TrimSpace(owner), ":")
+	if userPart == "" {
+		return -1, -1, fmt.Errorf("missing user")
+	}
+
+	uid, gid, err := parseUser(userPart)
+	if err != nil {
+		return -1, -1, err
+	}
+
+	if hasGroup {
+		parsedGID, err := parseGroup(groupPart)
+		if err != nil {
+			return -1, -1, err
+		}
+		gid = parsedGID
+	}
+
+	return uid, gid, nil
+}
+
+func parseUser(value string) (int, int, error) {
+	if uid, err := strconv.Atoi(value); err == nil {
+		return uid, -1, nil
+	}
+
+	userInfo, err := osuser.Lookup(value)
+	if err != nil {
+		return -1, -1, err
+	}
+
+	uid, err := strconv.Atoi(userInfo.Uid)
+	if err != nil {
+		return -1, -1, fmt.Errorf("invalid uid %q for user %q: %w", userInfo.Uid, value, err)
+	}
+
+	gid, err := strconv.Atoi(userInfo.Gid)
+	if err != nil {
+		return -1, -1, fmt.Errorf("invalid gid %q for user %q: %w", userInfo.Gid, value, err)
+	}
+
+	return uid, gid, nil
+}
+
+func parseGroup(value string) (int, error) {
+	if value == "" {
+		return -1, fmt.Errorf("missing group")
+	}
+
+	if gid, err := strconv.Atoi(value); err == nil {
+		return gid, nil
+	}
+
+	groupInfo, err := osuser.LookupGroup(value)
+	if err != nil {
+		return -1, err
+	}
+
+	gid, err := strconv.Atoi(groupInfo.Gid)
+	if err != nil {
+		return -1, fmt.Errorf("invalid gid %q for group %q: %w", groupInfo.Gid, value, err)
+	}
+
+	return gid, nil
 }
 
 func startPodmanSocket(mode PodmanMode) error {

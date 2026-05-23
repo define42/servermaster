@@ -1,5 +1,12 @@
 {
   "podman_mode": "rootful",
+  "folders": [
+    {
+      "path": "/data/web",
+      "chmod": "0755",
+      "user": "0:0"
+    }
+  ],
   "interfaces": [
     {
       "name": "eth0",

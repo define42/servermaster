@@ -5,21 +5,37 @@ It reads a JSON config file, ensures each declared container is recreated with t
 
 ## How it works
 
-1. Reads container definitions from `/data/config/containers.json`.
-2. Applies any host interface configuration declared in the config file.
-3. Starts `podman.socket` using systemd (`rootful` or `rootless` mode).
-4. Waits for the Podman Unix socket to become reachable.
-5. Pulls each image.
-6. Removes any existing container with the same name.
-7. Creates and starts the container from the declared spec.
+1. Reads container definitions from the configured JSON file.
+2. Ensures any declared host folders exist with the configured mode and owner.
+3. Applies any host interface configuration declared in the config file.
+4. Starts `podman.socket` using systemd (`rootful` or `rootless` mode).
+5. Waits for the Podman Unix socket to become reachable.
+6. Pulls each image.
+7. Removes any existing container with the same name.
+8. Creates and starts the container from the declared spec.
+
+## Usage
+
+```sh
+servermaster -config /data/config/containers.json
+```
+
+If `-config` is omitted, it defaults to `/data/config/containers.json`.
 
 ## Configuration
 
 Top-level fields in the JSON file:
 
 - `podman_mode`: `rootful` (default) or `rootless`
+- `folders`: optional list of host folders to create before containers start
 - `interfaces`: optional list of host network interface settings
 - `containers`: list of container definitions
+
+### Folder object
+
+- `path`: host folder path that must exist
+- `chmod`: optional octal permissions string (for example `0755`)
+- `user`: optional owner as `user`, `uid`, `user:group`, or `uid:gid`
 
 ### Interface object
 
@@ -57,4 +73,4 @@ Host interface changes are applied on the host with netlink and `resolvectl`, so
 
 ## Example config
 
-See `config.json` in this repository for a complete example with host interface settings, ports, and volumes.
+See `config.json` in this repository for a complete example with folders, host interface settings, ports, and volumes.

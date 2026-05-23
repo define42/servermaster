@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	osuser "os/user"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -33,6 +34,10 @@ const (
 	PodmanRootless PodmanMode = "rootless"
 
 	defaultConfigPath = "/data/config/containers.json"
+	webServerAddress  = ":8080"
+
+	serviceName       = "servermaster.service"
+	serviceBinaryPath = "/usr/local/bin/servermaster"
 
 	firewalldBusName       = "org.fedoraproject.FirewallD1"
 	firewalldObjectPath    = "/org/fedoraproject/FirewallD1"
@@ -138,11 +143,84 @@ type listedContainer struct {
 
 func main() {
 	configPath := flag.String("config", defaultConfigPath, "path to config JSON file")
+	installServiceFlag := flag.Bool("install-service", false, "install and start the systemd service")
 	flag.Parse()
 
-	cfg, err := loadConfig(*configPath)
-	if err != nil {
+	if *installServiceFlag {
+		if err := installService(*configPath); err != nil {
+			log.Fatal(err)
+		}
+		log.Printf("installed and started %s", serviceName)
+		return
+	}
+
+	if err := runService(*configPath); err != nil {
 		log.Fatal(err)
+	}
+}
+
+func runService(configPath string) error {
+	webServer, webServerErrors, err := startWebServer(webServerAddress)
+	if err != nil {
+		return err
+	}
+
+	if err := run(configPath); err != nil {
+		_ = webServer.Close()
+		return err
+	}
+
+	if err := <-webServerErrors; err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func startWebServer(address string) (*http.Server, <-chan error, error) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		fmt.Fprintln(w, "servermaster running")
+	})
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		fmt.Fprintln(w, "ok")
+	})
+
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return nil, nil, fmt.Errorf("start webserver on %s failed: %w", address, err)
+	}
+
+	server := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		err := server.Serve(listener)
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+			return
+		}
+		errCh <- nil
+	}()
+
+	log.Printf("webserver listening on %s", address)
+	return server, errCh, nil
+}
+
+func run(configPath string) error {
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		return err
 	}
 
 	mode := PodmanMode(cfg.PodmanMode)
@@ -151,32 +229,32 @@ func main() {
 	}
 
 	if err := validateConfig(cfg); err != nil {
-		log.Fatal(err)
+		return err
 	}
 
 	if err := ensureFolders(cfg.Folders); err != nil {
-		log.Fatal(err)
+		return err
 	}
 
 	if err := configureHostInterfaces(cfg.Interfaces); err != nil {
-		log.Fatal(err)
+		return err
 	}
 
 	if err := configureFirewallPorts(cfg.FirewallPorts); err != nil {
-		log.Fatal(err)
+		return err
 	}
 
 	if err := startPodmanSocket(mode); err != nil {
-		log.Fatal(err)
+		return err
 	}
 
 	socketPath, err := podmanSocketPath(mode)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 
 	if err := waitForUnixSocket(socketPath, 10*time.Second); err != nil {
-		log.Fatal(err)
+		return err
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
@@ -184,20 +262,21 @@ func main() {
 
 	ctx, err = bindings.NewConnection(ctx, "unix:"+socketPath)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 
 	if err := stopUnmanagedContainers(ctx, cfg.Containers); err != nil {
-		log.Fatal(err)
+		return err
 	}
 
 	for _, c := range cfg.Containers {
 		if err := recreateContainer(ctx, c); err != nil {
-			log.Fatal(err)
+			return err
 		}
 	}
 
 	log.Println("all containers started")
+	return nil
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -237,6 +316,66 @@ func validateConfig(cfg *Config) error {
 	}
 
 	return nil
+}
+
+func installService(configPath string) error {
+	unitPath := filepath.Join("/etc/systemd/system", serviceName)
+
+	if err := os.WriteFile(unitPath, []byte(serviceContent(configPath)), 0o644); err != nil {
+		return fmt.Errorf("write unit file: %w", err)
+	}
+
+	conn, err := systemd.NewSystemConnection()
+	if err != nil {
+		return fmt.Errorf("connect to systemd: %w", err)
+	}
+	defer conn.Close()
+
+	if err := conn.Reload(); err != nil {
+		return fmt.Errorf("systemd daemon-reload failed: %w", err)
+	}
+
+	_, _, err = conn.EnableUnitFiles([]string{serviceName}, false, true)
+	if err != nil {
+		return fmt.Errorf("enable unit failed: %w", err)
+	}
+
+	ch := make(chan string, 1)
+	_, err = conn.StartUnit(serviceName, "replace", ch)
+	if err != nil {
+		return fmt.Errorf("start unit failed: %w", err)
+	}
+
+	result := <-ch
+	if result != "done" {
+		return fmt.Errorf("start unit result: %s", result)
+	}
+
+	return nil
+}
+
+func serviceContent(configPath string) string {
+	return fmt.Sprintf(`[Unit]
+Description=Servermaster Node Configuration Service
+After=network-online.target podman.socket firewalld.service
+Wants=network-online.target
+Requires=podman.socket
+
+[Service]
+Type=simple
+ExecStart=%s -config %s
+Restart=always
+RestartSec=10s
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target
+`, serviceBinaryPath, systemdQuoteArg(configPath))
+}
+
+func systemdQuoteArg(arg string) string {
+	return strconv.Quote(strings.ReplaceAll(arg, "%", "%%"))
 }
 
 func validateFirewallPort(port string) error {

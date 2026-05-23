@@ -24,6 +24,11 @@
       "zone": "public",
       "port": "8080",
       "protocol": "tcp"
+    },
+    {
+      "zone": "public",
+      "port": "8081",
+      "protocol": "tcp"
     }
   ],
   "containers": [
@@ -38,7 +43,7 @@
       "ports": [
         {
           "host_ip": "0.0.0.0",
-          "host_port": 8080,
+          "host_port": 8081,
           "container_port": 80,
           "protocol": "tcp"
         }

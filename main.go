@@ -480,23 +480,25 @@ func installService(configPath string) error {
 		return fmt.Errorf("write unit file: %w", err)
 	}
 
-	conn, err := systemd.NewSystemConnection()
+	ctx := context.Background()
+
+	conn, err := systemd.NewSystemConnectionContext(ctx)
 	if err != nil {
 		return fmt.Errorf("connect to systemd: %w", err)
 	}
 	defer conn.Close()
 
-	if err := conn.Reload(); err != nil {
+	if err := conn.ReloadContext(ctx); err != nil {
 		return fmt.Errorf("systemd daemon-reload failed: %w", err)
 	}
 
-	_, _, err = conn.EnableUnitFiles([]string{serviceName}, false, true)
+	_, _, err = conn.EnableUnitFilesContext(ctx, []string{serviceName}, false, true)
 	if err != nil {
 		return fmt.Errorf("enable unit failed: %w", err)
 	}
 
 	ch := make(chan string, 1)
-	_, err = conn.StartUnit(serviceName, "replace", ch)
+	_, err = conn.StartUnitContext(ctx, serviceName, "replace", ch)
 	if err != nil {
 		return fmt.Errorf("start unit failed: %w", err)
 	}
@@ -764,14 +766,16 @@ func addFirewallPort(firewalld dbus.BusObject, zone string, port string, protoco
 }
 
 func startPodmanSocket(mode PodmanMode) error {
+	ctx := context.Background()
+
 	var conn *systemd.Conn
 	var err error
 
 	switch mode {
 	case PodmanRootful:
-		conn, err = systemd.NewSystemConnection()
+		conn, err = systemd.NewSystemConnectionContext(ctx)
 	case PodmanRootless:
-		conn, err = systemd.NewUserConnection()
+		conn, err = systemd.NewUserConnectionContext(ctx)
 	default:
 		return fmt.Errorf("unknown podman mode: %s", mode)
 	}
@@ -783,7 +787,7 @@ func startPodmanSocket(mode PodmanMode) error {
 
 	ch := make(chan string, 1)
 
-	_, err = conn.StartUnit("podman.socket", "replace", ch)
+	_, err = conn.StartUnitContext(ctx, "podman.socket", "replace", ch)
 	if err != nil {
 		return fmt.Errorf("start podman.socket failed: %w", err)
 	}

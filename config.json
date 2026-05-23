@@ -1,5 +1,17 @@
 {
   "podman_mode": "rootful",
+  "interfaces": [
+    {
+      "name": "eth0",
+      "ip_address": "192.168.1.10",
+      "subnet": "192.168.1.0/24",
+      "gateway": "192.168.1.1",
+      "dns": [
+        "1.1.1.1",
+        "8.8.8.8"
+      ]
+    }
+  ],
   "containers": [
     {
       "name": "web",
@@ -21,19 +33,6 @@
           "host_path": "/data/web",
           "container_path": "/usr/share/nginx/html",
           "read_only": true
-        }
-      ],
-      "interfaces": [
-        {
-          "name": "eth0",
-          "network": "podman",
-          "ip_address": "10.88.0.10",
-          "subnet": "10.88.0.0/16",
-          "gateway": "10.88.0.1",
-          "dns": [
-            "1.1.1.1",
-            "8.8.8.8"
-          ]
         }
       ],
       "restart": "always"

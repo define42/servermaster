@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"os/exec"
+	"strings"
 	"time"
 
 	nettypes "github.com/containers/common/libnetwork/types"
@@ -28,6 +30,7 @@ const (
 
 type Config struct {
 	PodmanMode string            `json:"podman_mode"`
+	Interfaces []InterfaceConfig `json:"interfaces"`
 	Containers []ContainerConfig `json:"containers"`
 }
 
@@ -44,7 +47,6 @@ type ContainerConfig struct {
 
 type InterfaceConfig struct {
 	Name      string   `json:"name"`
-	Network   string   `json:"network"`
 	IPAddress string   `json:"ip_address"`
 	Subnet    string   `json:"subnet"`
 	Gateway   string   `json:"gateway"`
@@ -73,6 +75,14 @@ func main() {
 	mode := PodmanMode(cfg.PodmanMode)
 	if mode == "" {
 		mode = PodmanRootful
+	}
+
+	if err := validateConfig(cfg); err != nil {
+		log.Fatal(err)
+	}
+
+	if err := configureHostInterfaces(cfg.Interfaces); err != nil {
+		log.Fatal(err)
 	}
 
 	if err := startPodmanSocket(mode); err != nil {
@@ -117,6 +127,16 @@ func loadConfig(path string) (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+func validateConfig(cfg *Config) error {
+	for _, c := range cfg.Containers {
+		if len(c.Interfaces) > 0 {
+			return fmt.Errorf("container %q defines interfaces; interfaces configure host interfaces and must be declared at the top level", c.Name)
+		}
+	}
+
+	return nil
 }
 
 func startPodmanSocket(mode PodmanMode) error {
@@ -260,77 +280,6 @@ func createSpec(c ContainerConfig) (*specgen.SpecGenerator, error) {
 		})
 	}
 
-	if len(c.Interfaces) > 0 {
-		s.Networks = make(map[string]nettypes.PerNetworkOptions, len(c.Interfaces))
-		dnsServers := make([]net.IP, 0, len(c.Interfaces)*2)
-
-		for i, iface := range c.Interfaces {
-			// Use an index-based label in error messages when no name is given.
-			ifaceLabel := iface.Name
-			if ifaceLabel == "" {
-				ifaceLabel = fmt.Sprintf("#%d", i)
-			}
-
-			networkName := iface.Network
-			if networkName == "" {
-				networkName = "podman"
-			}
-
-			if existingNetwork, exists := s.Networks[networkName]; exists && existingNetwork.InterfaceName != "" && iface.Name != "" && existingNetwork.InterfaceName != iface.Name {
-				return nil, fmt.Errorf("network %q is configured multiple times for container %q with different interfaces (%q and %q); use a unique network per interface so static ip is applied to the correct interface", networkName, c.Name, existingNetwork.InterfaceName, iface.Name)
-			}
-
-			network := s.Networks[networkName]
-			if iface.Name != "" {
-				network.InterfaceName = iface.Name
-			}
-
-			if iface.IPAddress != "" {
-				ip, err := parseAddr(iface.IPAddress)
-				if err != nil {
-					return nil, fmt.Errorf("invalid ip_address %q for container %q interface %s", iface.IPAddress, c.Name, ifaceLabel)
-				}
-				network.StaticIPs = append(network.StaticIPs, ip)
-			}
-
-			if iface.Subnet != "" {
-				_, cidr, err := net.ParseCIDR(iface.Subnet)
-				if err != nil {
-					return nil, fmt.Errorf("invalid subnet %q for container %q interface %s: %w", iface.Subnet, c.Name, ifaceLabel, err)
-				}
-				if network.Options == nil {
-					network.Options = map[string]string{}
-				}
-				network.Options["subnet"] = cidr.String()
-			}
-
-			if iface.Gateway != "" {
-				gateway, err := parseAddr(iface.Gateway)
-				if err != nil {
-					return nil, fmt.Errorf("invalid gateway %q for container %q interface %s", iface.Gateway, c.Name, ifaceLabel)
-				}
-				if network.Options == nil {
-					network.Options = map[string]string{}
-				}
-				network.Options["gateway"] = gateway.String()
-			}
-
-			for _, dns := range iface.DNS {
-				dnsIP, err := parseAddr(dns)
-				if err != nil {
-					return nil, fmt.Errorf("invalid dns server %q for container %q interface %s", dns, c.Name, ifaceLabel)
-				}
-				dnsServers = append(dnsServers, dnsIP)
-			}
-
-			s.Networks[networkName] = network
-		}
-
-		if len(dnsServers) > 0 {
-			s.DNSServers = dnsServers
-		}
-	}
-
 	if c.Restart != "" {
 		s.RestartPolicy = c.Restart
 	}
@@ -342,10 +291,113 @@ func pointer[T any](v T) *T {
 	return &v
 }
 
+func configureHostInterfaces(interfaces []InterfaceConfig) error {
+	for i, iface := range interfaces {
+		ifaceLabel := iface.Name
+		if ifaceLabel == "" {
+			ifaceLabel = fmt.Sprintf("#%d", i)
+		}
+
+		if iface.Name == "" {
+			return fmt.Errorf("host interface %s is missing name", ifaceLabel)
+		}
+
+		if _, err := net.InterfaceByName(iface.Name); err != nil {
+			return fmt.Errorf("host interface %q not found: %w", iface.Name, err)
+		}
+
+		if (iface.IPAddress == "") != (iface.Subnet == "") {
+			return fmt.Errorf("host interface %q must set both ip_address and subnet", iface.Name)
+		}
+
+		if iface.IPAddress != "" {
+			ip, prefixLength, err := parseInterfaceAddress(iface.IPAddress, iface.Subnet)
+			if err != nil {
+				return fmt.Errorf("invalid host interface %s address: %w", ifaceLabel, err)
+			}
+
+			if err := runCommand("ip", "addr", "replace", fmt.Sprintf("%s/%d", ip.String(), prefixLength), "dev", iface.Name); err != nil {
+				return fmt.Errorf("configure address for host interface %q failed: %w", iface.Name, err)
+			}
+		}
+
+		if err := runCommand("ip", "link", "set", "dev", iface.Name, "up"); err != nil {
+			return fmt.Errorf("bring up host interface %q failed: %w", iface.Name, err)
+		}
+
+		if iface.Gateway != "" {
+			gateway, err := parseAddr(iface.Gateway)
+			if err != nil {
+				return fmt.Errorf("invalid gateway %q for host interface %s", iface.Gateway, ifaceLabel)
+			}
+
+			args := []string{"route", "replace", "default", "via", gateway.String(), "dev", iface.Name}
+			if gateway.To4() == nil {
+				args = append([]string{"-6"}, args...)
+			}
+
+			if err := runCommand("ip", args...); err != nil {
+				return fmt.Errorf("configure default route for host interface %q failed: %w", iface.Name, err)
+			}
+		}
+
+		if len(iface.DNS) > 0 {
+			args := []string{"dns", iface.Name}
+			for _, dns := range iface.DNS {
+				dnsIP, err := parseAddr(dns)
+				if err != nil {
+					return fmt.Errorf("invalid dns server %q for host interface %s", dns, ifaceLabel)
+				}
+				args = append(args, dnsIP.String())
+			}
+
+			if err := runCommand("resolvectl", args...); err != nil {
+				return fmt.Errorf("configure DNS for host interface %q failed: %w", iface.Name, err)
+			}
+		}
+	}
+
+	return nil
+}
+
+func parseInterfaceAddress(address string, subnet string) (net.IP, int, error) {
+	ip, err := parseAddr(address)
+	if err != nil {
+		return nil, 0, fmt.Errorf("invalid ip_address %q", address)
+	}
+
+	_, cidr, err := net.ParseCIDR(subnet)
+	if err != nil {
+		return nil, 0, fmt.Errorf("invalid subnet %q: %w", subnet, err)
+	}
+
+	if !cidr.Contains(ip) {
+		return nil, 0, fmt.Errorf("ip_address %q is not within subnet %q", address, subnet)
+	}
+
+	ones, _ := cidr.Mask.Size()
+	return ip, ones, nil
+}
+
 func parseAddr(addr string) (net.IP, error) {
 	parsed, err := netip.ParseAddr(addr)
 	if err != nil {
 		return nil, err
 	}
 	return net.IP(parsed.AsSlice()), nil
+}
+
+func runCommand(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		return nil
+	}
+
+	message := strings.TrimSpace(string(output))
+	if message == "" {
+		return fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
+	}
+
+	return fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, message)
 }

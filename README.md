@@ -6,18 +6,30 @@ It reads a JSON config file, ensures each declared container is recreated with t
 ## How it works
 
 1. Reads container definitions from `/data/config/containers.json`.
-2. Starts `podman.socket` using systemd (`rootful` or `rootless` mode).
-3. Waits for the Podman Unix socket to become reachable.
-4. Pulls each image.
-5. Removes any existing container with the same name.
-6. Creates and starts the container from the declared spec.
+2. Applies any host interface configuration declared in the config file.
+3. Starts `podman.socket` using systemd (`rootful` or `rootless` mode).
+4. Waits for the Podman Unix socket to become reachable.
+5. Pulls each image.
+6. Removes any existing container with the same name.
+7. Creates and starts the container from the declared spec.
 
 ## Configuration
 
 Top-level fields in the JSON file:
 
 - `podman_mode`: `rootful` (default) or `rootless`
+- `interfaces`: optional list of host network interface settings
 - `containers`: list of container definitions
+
+### Interface object
+
+Host interface changes are applied on the host with `ip` and `resolvectl`, so the process needs permission to change host networking.
+
+- `name`: host interface name (for example `eth0`)
+- `ip_address`: static IP to assign to the host interface
+- `subnet`: subnet CIDR for the host interface
+- `gateway`: default gateway IP for the host interface
+- `dns`: DNS server list for the host interface
 
 ### Container fields
 
@@ -26,7 +38,6 @@ Top-level fields in the JSON file:
 - `env`: key/value environment variables
 - `ports`: list of published ports
 - `volumes`: list of bind mounts
-- `interfaces`: optional list of per-network interface settings
 - `command`: optional command override
 - `restart`: optional Podman restart policy
 
@@ -43,15 +54,6 @@ Top-level fields in the JSON file:
 - `container_path`: target path in container
 - `read_only`: whether mount is read-only
 
-### Interface object
-
-- `name`: interface name inside container (for example `eth0`)
-- `network`: Podman network name (defaults to `podman` when omitted)
-- `ip_address`: static IP for the interface
-- `subnet`: subnet CIDR
-- `gateway`: gateway IP
-- `dns`: DNS server list for the container
-
 ## Example config
 
-See `config.json` in this repository for a complete example with ports, volumes, and network interface settings.
+See `config.json` in this repository for a complete example with host interface settings, ports, and volumes.

@@ -19,6 +19,13 @@
       ]
     }
   ],
+  "firewall_ports": [
+    {
+      "zone": "public",
+      "port": "8080",
+      "protocol": "tcp"
+    }
+  ],
   "containers": [
     {
       "name": "web",

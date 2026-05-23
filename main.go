@@ -22,6 +22,7 @@ import (
 
 	"github.com/containers/podman/v5/pkg/bindings"
 	systemd "github.com/coreos/go-systemd/v22/dbus"
+	dbus "github.com/godbus/dbus/v5"
 	"github.com/vishvananda/netlink"
 )
 
@@ -32,13 +33,18 @@ const (
 	PodmanRootless PodmanMode = "rootless"
 
 	defaultConfigPath = "/data/config/containers.json"
+
+	firewalldBusName       = "org.fedoraproject.FirewallD1"
+	firewalldObjectPath    = "/org/fedoraproject/FirewallD1"
+	firewalldZoneInterface = "org.fedoraproject.FirewallD1.zone"
 )
 
 type Config struct {
-	PodmanMode string            `json:"podman_mode"`
-	Folders    []FolderConfig    `json:"folders"`
-	Interfaces []InterfaceConfig `json:"interfaces"`
-	Containers []ContainerConfig `json:"containers"`
+	PodmanMode    string               `json:"podman_mode"`
+	Folders       []FolderConfig       `json:"folders"`
+	Interfaces    []InterfaceConfig    `json:"interfaces"`
+	FirewallPorts []FirewallPortConfig `json:"firewall_ports"`
+	Containers    []ContainerConfig    `json:"containers"`
 }
 
 type FolderConfig struct {
@@ -65,6 +71,12 @@ type InterfaceConfig struct {
 	Subnet    string   `json:"subnet"`
 	Gateway   string   `json:"gateway"`
 	DNS       []string `json:"dns"`
+}
+
+type FirewallPortConfig struct {
+	Zone     string `json:"zone"`
+	Port     string `json:"port"`
+	Protocol string `json:"protocol"`
 }
 
 type PortConfig struct {
@@ -150,6 +162,10 @@ func main() {
 		log.Fatal(err)
 	}
 
+	if err := configureFirewallPorts(cfg.FirewallPorts); err != nil {
+		log.Fatal(err)
+	}
+
 	if err := startPodmanSocket(mode); err != nil {
 		log.Fatal(err)
 	}
@@ -199,6 +215,21 @@ func loadConfig(path string) (*Config, error) {
 }
 
 func validateConfig(cfg *Config) error {
+	for i, port := range cfg.FirewallPorts {
+		portLabel := strings.TrimSpace(port.Port)
+		if portLabel == "" {
+			portLabel = fmt.Sprintf("#%d", i)
+		}
+
+		if err := validateFirewallPort(port.Port); err != nil {
+			return fmt.Errorf("invalid firewall port %s: %w", portLabel, err)
+		}
+
+		if err := validateFirewallProtocol(port.Protocol); err != nil {
+			return fmt.Errorf("invalid firewall protocol for port %s: %w", portLabel, err)
+		}
+	}
+
 	for _, c := range cfg.Containers {
 		if len(c.Interfaces) > 0 {
 			return fmt.Errorf("container %q defines interfaces; interfaces configure host interfaces and must be declared at the top level", c.Name)
@@ -206,6 +237,54 @@ func validateConfig(cfg *Config) error {
 	}
 
 	return nil
+}
+
+func validateFirewallPort(port string) error {
+	port = strings.TrimSpace(port)
+	if port == "" {
+		return fmt.Errorf("missing port")
+	}
+
+	start, end, hasRange := strings.Cut(port, "-")
+	startPort, err := parsePortNumber(start)
+	if err != nil {
+		return err
+	}
+
+	if !hasRange {
+		return nil
+	}
+
+	endPort, err := parsePortNumber(end)
+	if err != nil {
+		return err
+	}
+	if startPort > endPort {
+		return fmt.Errorf("range start is greater than range end")
+	}
+
+	return nil
+}
+
+func parsePortNumber(port string) (int, error) {
+	value, err := strconv.Atoi(strings.TrimSpace(port))
+	if err != nil {
+		return 0, err
+	}
+	if value < 1 || value > 65535 {
+		return 0, fmt.Errorf("port must be between 1 and 65535")
+	}
+
+	return value, nil
+}
+
+func validateFirewallProtocol(protocol string) error {
+	switch strings.ToLower(strings.TrimSpace(protocol)) {
+	case "", "tcp", "udp", "sctp", "dccp":
+		return nil
+	default:
+		return fmt.Errorf("protocol must be tcp, udp, sctp, or dccp")
+	}
 }
 
 func ensureFolders(folders []FolderConfig) error {
@@ -339,6 +418,55 @@ func parseGroup(value string) (int, error) {
 	}
 
 	return gid, nil
+}
+
+func configureFirewallPorts(ports []FirewallPortConfig) error {
+	if len(ports) == 0 {
+		return nil
+	}
+
+	conn, err := dbus.ConnectSystemBus()
+	if err != nil {
+		return fmt.Errorf("connect to system bus failed: %w", err)
+	}
+	defer conn.Close()
+
+	firewalld := conn.Object(firewalldBusName, dbus.ObjectPath(firewalldObjectPath))
+	for _, port := range ports {
+		zone := strings.TrimSpace(port.Zone)
+		portValue := strings.TrimSpace(port.Port)
+		protocol := strings.ToLower(strings.TrimSpace(port.Protocol))
+		if protocol == "" {
+			protocol = "tcp"
+		}
+
+		enabled, err := queryFirewallPort(firewalld, zone, portValue, protocol)
+		if err != nil {
+			return fmt.Errorf("query firewall port %s/%s failed: %w", portValue, protocol, err)
+		}
+		if enabled {
+			continue
+		}
+
+		if err := addFirewallPort(firewalld, zone, portValue, protocol); err != nil {
+			return fmt.Errorf("open firewall port %s/%s failed: %w", portValue, protocol, err)
+		}
+
+		log.Printf("opened firewall port %s/%s", portValue, protocol)
+	}
+
+	return nil
+}
+
+func queryFirewallPort(firewalld dbus.BusObject, zone string, port string, protocol string) (bool, error) {
+	var enabled bool
+	err := firewalld.Call(firewalldZoneInterface+".queryPort", 0, zone, port, protocol).Store(&enabled)
+	return enabled, err
+}
+
+func addFirewallPort(firewalld dbus.BusObject, zone string, port string, protocol string) error {
+	var appliedZone string
+	return firewalld.Call(firewalldZoneInterface+".addPort", 0, zone, port, protocol, int32(0)).Store(&appliedZone)
 }
 
 func startPodmanSocket(mode PodmanMode) error {

@@ -5,6 +5,7 @@ go 1.26.2
 require (
 	github.com/containers/podman/v5 v5.8.2
 	github.com/coreos/go-systemd/v22 v22.7.0
+	github.com/godbus/dbus/v5 v5.1.1-0.20241109141217-c266b19b28e9
 	github.com/vishvananda/netlink v1.3.1
 )
 
@@ -13,7 +14,6 @@ require (
 	github.com/blang/semver/v4 v4.0.0 // indirect
 	github.com/cyphar/filepath-securejoin v0.5.2 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
-	github.com/godbus/dbus/v5 v5.1.1-0.20241109141217-c266b19b28e9 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	github.com/kevinburke/ssh_config v1.4.0 // indirect

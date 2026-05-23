@@ -8,12 +8,13 @@ It reads a JSON config file, ensures each declared container is recreated with t
 1. Reads container definitions from the configured JSON file.
 2. Ensures any declared host folders exist with the configured mode and owner.
 3. Applies any host interface configuration declared in the config file.
-4. Starts `podman.socket` using systemd (`rootful` or `rootless` mode).
-5. Waits for the Podman Unix socket to become reachable.
-6. Stops any running containers that are not declared in the config file.
-7. Pulls each image.
-8. Removes any existing container with the same name.
-9. Creates and starts the container from the declared spec.
+4. Opens any declared firewall ports through firewalld D-Bus.
+5. Starts `podman.socket` using systemd (`rootful` or `rootless` mode).
+6. Waits for the Podman Unix socket to become reachable.
+7. Stops any running containers that are not declared in the config file.
+8. Pulls each image.
+9. Removes any existing container with the same name.
+10. Creates and starts the container from the declared spec.
 
 ## Usage
 
@@ -30,6 +31,7 @@ Top-level fields in the JSON file:
 - `podman_mode`: `rootful` (default) or `rootless`
 - `folders`: optional list of host folders to create before containers start
 - `interfaces`: optional list of host network interface settings
+- `firewall_ports`: optional list of firewalld runtime ports to open
 - `containers`: list of container definitions
 
 ### Folder object
@@ -47,6 +49,14 @@ Host interface changes are applied on the host with netlink and `resolvectl`, so
 - `subnet`: subnet CIDR for the host interface
 - `gateway`: default gateway IP for the host interface
 - `dns`: DNS server list for the host interface
+
+### Firewall port object
+
+Firewall ports are opened with `github.com/godbus/dbus/v5` against firewalld's runtime D-Bus API.
+
+- `zone`: optional firewalld zone (empty uses the default zone)
+- `port`: port or port range as a string (for example `8080` or `8000-8010`)
+- `protocol`: protocol (`tcp` default; supports `tcp`, `udp`, `sctp`, and `dccp`)
 
 ### Container fields
 
@@ -74,4 +84,4 @@ Host interface changes are applied on the host with netlink and `resolvectl`, so
 
 ## Example config
 
-See `config.json` in this repository for a complete example with folders, host interface settings, ports, and volumes.
+See `config.json` in this repository for a complete example with folders, host interface settings, firewall ports, container ports, and volumes.

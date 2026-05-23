@@ -38,6 +38,7 @@ type Config struct {
 type ContainerConfig struct {
 	Name       string            `json:"name"`
 	Image      string            `json:"image"`
+	User       string            `json:"user"`
 	Env        map[string]string `json:"env"`
 	Ports      []PortConfig      `json:"ports"`
 	Volumes    []VolumeConfig    `json:"volumes"`
@@ -70,6 +71,7 @@ type VolumeConfig struct {
 type containerSpec struct {
 	Name          string            `json:"name,omitempty"`
 	Image         string            `json:"image"`
+	User          string            `json:"user,omitempty"`
 	Env           map[string]string `json:"env,omitempty"`
 	Command       []string          `json:"command,omitempty"`
 	PortMappings  []portMapping     `json:"portmappings,omitempty"`
@@ -281,6 +283,7 @@ func createSpec(c ContainerConfig) (*containerSpec, error) {
 	s := &containerSpec{
 		Name:    c.Name,
 		Image:   c.Image,
+		User:    c.User,
 		Env:     c.Env,
 		Command: c.Command,
 	}

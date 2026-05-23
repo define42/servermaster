@@ -23,7 +23,7 @@ Top-level fields in the JSON file:
 
 ### Interface object
 
-Host interface changes are applied on the host with `ip` and `resolvectl`, so the process needs permission to change host networking.
+Host interface changes are applied on the host with netlink and `resolvectl`, so the process needs permission to change host networking.
 
 - `name`: host interface name (for example `eth0`)
 - `ip_address`: static IP to assign to the host interface
@@ -35,6 +35,7 @@ Host interface changes are applied on the host with `ip` and `resolvectl`, so th
 
 - `name`: container name
 - `image`: image reference to pull and run
+- `user`: optional user or user/group for the container process (for example `1000`, `1000:1000`, or `nginx`)
 - `env`: key/value environment variables
 - `ports`: list of published ports
 - `volumes`: list of bind mounts

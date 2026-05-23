@@ -16,6 +16,7 @@
     {
       "name": "web",
       "image": "docker.io/library/nginx:latest",
+      "user": "0:0",
       "env": {
         "TZ": "Europe/Copenhagen",
         "LOG_LEVEL": "info"

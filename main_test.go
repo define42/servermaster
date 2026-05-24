@@ -442,6 +442,47 @@ func TestBuildNMState(t *testing.T) {
 		}
 	})
 
+	t.Run("vlan interface", func(t *testing.T) {
+		state, err := buildNMState([]InterfaceConfig{{
+			Name:      "eth0.100",
+			Type:      "vlan",
+			IPAddress: "192.168.100.10",
+			Subnet:    "192.168.100.0/24",
+			VLAN:      &VLANConfig{BaseInterface: "eth0", ID: 100},
+		}})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		iface := state.Interfaces[0]
+		if iface.Type != "vlan" || iface.VLAN == nil {
+			t.Fatalf("vlan interface mismatch: %+v", iface)
+		}
+		if iface.VLAN.BaseIface != "eth0" || iface.VLAN.ID != 100 {
+			t.Fatalf("vlan settings = %+v, want base eth0 id 100", iface.VLAN)
+		}
+		if iface.IPv4 == nil || iface.IPv4.Addresses[0].IP != "192.168.100.10" {
+			t.Fatalf("vlan ipv4 mismatch: %+v", iface.IPv4)
+		}
+	})
+
+	vlanErrors := []struct {
+		name  string
+		iface InterfaceConfig
+	}{
+		{"vlan type without settings", InterfaceConfig{Name: "eth0.100", Type: "vlan"}},
+		{"vlan missing base", InterfaceConfig{Name: "eth0.100", Type: "vlan", VLAN: &VLANConfig{ID: 100}}},
+		{"vlan id too low", InterfaceConfig{Name: "eth0.0", Type: "vlan", VLAN: &VLANConfig{BaseInterface: "eth0", ID: 0}}},
+		{"vlan id too high", InterfaceConfig{Name: "eth0.x", Type: "vlan", VLAN: &VLANConfig{BaseInterface: "eth0", ID: 4095}}},
+		{"vlan settings on non-vlan type", InterfaceConfig{Name: "eth0", Type: "ethernet", VLAN: &VLANConfig{BaseInterface: "eth0", ID: 100}}},
+	}
+	for _, tt := range vlanErrors {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := buildNMState([]InterfaceConfig{tt.iface}); err == nil {
+				t.Fatalf("buildNMState(%+v) expected error, got nil", tt.iface)
+			}
+		})
+	}
+
 	t.Run("ipv6 gateway yields default v6 route", func(t *testing.T) {
 		state, err := buildNMState([]InterfaceConfig{{
 			Name:      "eth0",

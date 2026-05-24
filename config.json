@@ -32,6 +32,16 @@
         "1.1.1.1",
         "8.8.8.8"
       ]
+    },
+    {
+      "name": "eth0.100",
+      "type": "vlan",
+      "ip_address": "192.168.100.10",
+      "subnet": "192.168.100.0/24",
+      "vlan": {
+        "base_interface": "eth0",
+        "id": 100
+      }
     }
   ],
   "ostree": {

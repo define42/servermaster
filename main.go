@@ -126,12 +126,21 @@ type ContainerConfig struct {
 }
 
 type InterfaceConfig struct {
-	Name      string   `json:"name"`
-	Type      string   `json:"type"`
-	IPAddress string   `json:"ip_address"`
-	Subnet    string   `json:"subnet"`
-	Gateway   string   `json:"gateway"`
-	DNS       []string `json:"dns"`
+	Name      string      `json:"name"`
+	Type      string      `json:"type"`
+	IPAddress string      `json:"ip_address"`
+	Subnet    string      `json:"subnet"`
+	Gateway   string      `json:"gateway"`
+	DNS       []string    `json:"dns"`
+	VLAN      *VLANConfig `json:"vlan,omitempty"`
+}
+
+// VLANConfig describes an 802.1Q VLAN interface (type "vlan"): the VLAN rides on
+// BaseInterface and is tagged with ID. The interface Name is the VLAN device's
+// own name, conventionally "<base>.<id>" such as "eth0.100".
+type VLANConfig struct {
+	BaseInterface string `json:"base_interface"`
+	ID            int    `json:"id"`
 }
 
 type FirewallPortConfig struct {
@@ -2315,6 +2324,12 @@ type nmInterface struct {
 	State string     `json:"state"`
 	IPv4  *nmIPStack `json:"ipv4,omitempty"`
 	IPv6  *nmIPStack `json:"ipv6,omitempty"`
+	VLAN  *nmVLAN    `json:"vlan,omitempty"`
+}
+
+type nmVLAN struct {
+	BaseIface string `json:"base-iface"`
+	ID        int    `json:"id"`
 }
 
 type nmIPStack struct {
@@ -2569,15 +2584,32 @@ func buildNMState(interfaces []InterfaceConfig) (*nmState, error) {
 		}
 
 		// Defaults to a physical NIC (the documented use case, e.g. eth0). An
-		// explicit type lets nmstate manage other kinds it supports — for example
-		// "dummy" for a software test interface. nmstate validates the value at
-		// apply time. Bonds, VLANs, and bridges need extra params and remain out
-		// of scope for this schema.
+		// explicit type lets nmstate manage other kinds it supports — "dummy" for
+		// a software test interface, or "vlan" for an 802.1Q tagged interface.
+		// nmstate validates the value at apply time. Bonds and bridges need extra
+		// params and remain out of scope for this schema.
 		ifaceType := strings.TrimSpace(iface.Type)
 		if ifaceType == "" {
 			ifaceType = "ethernet"
 		}
 		nmIface := nmInterface{Name: iface.Name, Type: ifaceType, State: "up"}
+
+		switch {
+		case ifaceType == "vlan":
+			if iface.VLAN == nil {
+				return nil, fmt.Errorf("host interface %s is type vlan but has no vlan settings", ifaceLabel)
+			}
+			base := strings.TrimSpace(iface.VLAN.BaseInterface)
+			if base == "" {
+				return nil, fmt.Errorf("host interface %s vlan is missing base_interface", ifaceLabel)
+			}
+			if iface.VLAN.ID < 1 || iface.VLAN.ID > 4094 {
+				return nil, fmt.Errorf("host interface %s vlan id %d must be between 1 and 4094", ifaceLabel, iface.VLAN.ID)
+			}
+			nmIface.VLAN = &nmVLAN{BaseIface: base, ID: iface.VLAN.ID}
+		case iface.VLAN != nil:
+			return nil, fmt.Errorf("host interface %s sets vlan settings but type is %q, not \"vlan\"", ifaceLabel, ifaceType)
+		}
 
 		if iface.IPAddress != "" {
 			ipNet, err := parseInterfaceAddress(iface.IPAddress, iface.Subnet)

@@ -205,14 +205,31 @@ status`); externally-created `unmanaged` devices cannot be configured this way.
 DNS servers from all interfaces are merged into nmstate's single global resolver
 list.
 
-- `name`: host interface name, for example `eth0`
+- `name`: host interface name, for example `eth0` (or `eth0.100` for a VLAN)
 - `type`: nmstate interface type; defaults to `ethernet`. Set `dummy` for a
-  software test interface. The value is passed to nmstate, which validates it;
-  bonds, VLANs, and bridges need extra parameters and are not supported here.
+  software test interface, or `vlan` for an 802.1Q tagged interface. The value is
+  passed to nmstate, which validates it; bonds and bridges need extra parameters
+  and are not supported here.
 - `ip_address`: static IP to assign to the host interface
 - `subnet`: subnet CIDR for the host interface
 - `gateway`: default gateway IP for the host interface
 - `dns`: DNS server list for the host interface
+- `vlan`: required when `type` is `vlan`; the VLAN settings:
+  - `base_interface`: the interface the VLAN rides on, for example `eth0`
+  - `id`: the 802.1Q VLAN tag, `1`–`4094`
+
+A VLAN interface tags traffic on its `base_interface`; that base interface must
+exist and be NetworkManager-managed.
+
+```json
+{
+  "name": "eth0.100",
+  "type": "vlan",
+  "ip_address": "192.168.100.10",
+  "subnet": "192.168.100.0/24",
+  "vlan": { "base_interface": "eth0", "id": 100 }
+}
+```
 
 ### Firewall Ports
 

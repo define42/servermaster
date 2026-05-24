@@ -507,6 +507,21 @@ func TestValidateConfig(t *testing.T) {
 			}},
 			want: "selinux",
 		},
+		{
+			name: "folder missing path",
+			cfg:  &Config{Folders: []FolderConfig{{Chmod: "0755"}}},
+			want: "missing path",
+		},
+		{
+			name: "folder bad chmod",
+			cfg:  &Config{Folders: []FolderConfig{{Path: "/data", Chmod: "99999"}}},
+			want: "chmod",
+		},
+		{
+			name: "interface bad gateway",
+			cfg:  &Config{Interfaces: []InterfaceConfig{{Name: "eth0", Gateway: "not-an-ip"}}},
+			want: "gateway",
+		},
 	}
 
 	for _, tt := range errorCases {
@@ -529,6 +544,128 @@ func writeTempConfig(t *testing.T, body string) string {
 		t.Fatalf("write config: %v", err)
 	}
 	return path
+}
+
+// stubConfigApplier replaces the host-mutating apply with fn for the duration
+// of a test and returns a function that restores the original.
+func stubConfigApplier(fn func(*Config) error) func() {
+	prev := configApplier
+	configApplier = fn
+	return func() { configApplier = prev }
+}
+
+func TestWriteConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nested", "containers.json") // nested dir must be created
+	body := []byte(`{"podman_mode":"rootful"}`)
+
+	if err := writeConfigFile(path, body); err != nil {
+		t.Fatalf("writeConfigFile: %v", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(got) != string(body) {
+		t.Fatalf("contents = %q, want %q", got, body)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o644 {
+		t.Fatalf("mode = %o, want 0644", perm)
+	}
+}
+
+func TestHandleConfigUpload(t *testing.T) {
+	validBody := `{"containers":[{"name":"web","image":"nginx","ports":[{"host_port":8081,"container_port":80}]}]}`
+
+	t.Run("method not allowed", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/config", nil)
+		rec := httptest.NewRecorder()
+		handleConfigUpload(rec, req, "unused")
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("status = %d, want 405", rec.Code)
+		}
+	})
+
+	t.Run("malformed json is rejected without writing", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "containers.json")
+		req := httptest.NewRequest(http.MethodPost, "/config", strings.NewReader("{not json"))
+		rec := httptest.NewRecorder()
+		handleConfigUpload(rec, req, path)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+		}
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("config file must not be created on parse failure")
+		}
+	})
+
+	t.Run("invalid config is rejected without writing or applying", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "containers.json")
+		applied := false
+		defer stubConfigApplier(func(*Config) error { applied = true; return nil })()
+
+		body := `{"firewall_ports":[{"port":"70000"}]}`
+		req := httptest.NewRequest(http.MethodPost, "/config", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		handleConfigUpload(rec, req, path)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+		}
+		if applied {
+			t.Fatalf("invalid config must not be applied")
+		}
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("invalid config must not be written")
+		}
+	})
+
+	t.Run("valid config is saved and applied", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "containers.json")
+		var appliedCfg *Config
+		defer stubConfigApplier(func(c *Config) error { appliedCfg = c; return nil })()
+
+		req := httptest.NewRequest(http.MethodPost, "/config", strings.NewReader(validBody))
+		rec := httptest.NewRecorder()
+		handleConfigUpload(rec, req, path)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		if appliedCfg == nil || len(appliedCfg.Containers) != 1 || appliedCfg.Containers[0].Name != "web" {
+			t.Fatalf("apply received unexpected config: %+v", appliedCfg)
+		}
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read saved config: %v", err)
+		}
+		if string(got) != validBody {
+			t.Fatalf("saved config = %q, want the uploaded body verbatim", got)
+		}
+	})
+
+	t.Run("apply failure reports 500 but keeps the saved config", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "containers.json")
+		defer stubConfigApplier(func(*Config) error { return fmt.Errorf("firewalld down") })()
+
+		req := httptest.NewRequest(http.MethodPost, "/config", strings.NewReader(validBody))
+		rec := httptest.NewRecorder()
+		handleConfigUpload(rec, req, path)
+
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500; body=%s", rec.Code, rec.Body.String())
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("config must remain saved after an apply failure: %v", err)
+		}
+	})
 }
 
 func TestOstreeUploadPath(t *testing.T) {

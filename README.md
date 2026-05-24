@@ -5,7 +5,7 @@ It starts a small web server on port `8080`, reads a JSON config file, ensures e
 
 ## How it works
 
-1. Starts a web server on `:8080` with `/healthz` and the OS-update endpoints (see [OS updates](#os-updates)).
+1. Starts a web server on `:8080` with `/healthz`, the config-upload endpoint (see [Remote configuration](#remote-configuration)), and the OS-update endpoints (see [OS updates](#os-updates)).
 2. Reads container definitions from the configured JSON file.
 3. Ensures any declared host folders exist with the configured mode and owner.
 4. Applies any host interface configuration declared in the config file.
@@ -59,6 +59,20 @@ make rpm GOARCH=arm64          # cross-build for aarch64 edge devices
 Tagged releases on GitHub attach prebuilt `x86_64` and `aarch64` RPMs, so for a release you can download the package directly instead of building it.
 
 Add the resulting package to an image builder blueprint (`[[packages]]` from a custom repo) and enable the service as shown above.
+
+## Remote configuration
+
+`POST /config` (or `PUT`) accepts a raw `config.json` document, validates it, writes it atomically to the active config path (the `-config` path), and immediately converges the host to it — the same folders / host interfaces / firewall ports / containers reconcile that runs at startup. The uploaded body is written verbatim, so a successful upload becomes the new source of truth.
+
+- A malformed or invalid config is rejected with `400` and is **not** written to disk or applied.
+- A valid config that fails to apply (for example firewalld is down) is still saved; the response is `500` describing the failure, and the next reconcile or service restart retries it.
+- The body is capped at 1 MiB.
+
+```sh
+curl -X POST --data-binary @config.json http://node:8080/config
+```
+
+> **Security:** like the `/ostree/*` endpoints, `/config` is unauthenticated. Anyone who can reach `:8080` can rewrite the node's folders, host interfaces, firewall ports, and containers. Only expose this port on a trusted, isolated management network.
 
 ## OS updates
 

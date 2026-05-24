@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/containers/podman/v5/pkg/bindings"
@@ -36,6 +37,11 @@ const (
 	webServerAddress        = ":8080"
 	defaultOstreeUploadPath = "/data/ostree/update.tar"
 
+	// maxConfigUploadBytes caps the body accepted by /config. A node config is
+	// a small JSON document; the limit stops an unauthenticated caller from
+	// streaming an arbitrarily large body into memory.
+	maxConfigUploadBytes = 1 << 20 // 1 MiB
+
 	// nmstateStatePath is where the generated nmstate desired-state document is
 	// written before it is applied. The .yml extension (JSON is valid YAML) lets
 	// nmstate.service reapply it at boot in addition to the apply call below.
@@ -51,6 +57,15 @@ const (
 	firewalldConfigInterface     = "org.fedoraproject.FirewallD1.config"
 	firewalldConfigZoneInterface = "org.fedoraproject.FirewallD1.config.zone"
 )
+
+// applyMu serializes host convergence so the startup reconcile and concurrent
+// /config uploads cannot interleave changes to folders, interfaces, firewall,
+// or containers. Callers hold it across the whole apply.
+var applyMu sync.Mutex
+
+// configApplier converges the host to a parsed config. It is a package variable
+// so tests can substitute the host-mutating apply; production uses applyConfig.
+var configApplier = applyConfig
 
 type Config struct {
 	PodmanMode    string               `json:"podman_mode"`
@@ -178,9 +193,13 @@ func runService(configPath string) error {
 	// A reconcile failure is logged but does not exit the process: the unit
 	// is configured with Restart=always/RestartSec=10s, so returning here
 	// would tear down and recreate every container on a tight crash loop.
-	// The web server stays up so the host remains observable.
-	if err := run(configPath); err != nil {
-		log.Printf("reconcile failed: %v", err)
+	// The web server stays up so the host remains observable. applyMu is held
+	// so an early /config upload cannot race the startup convergence.
+	applyMu.Lock()
+	runErr := run(configPath)
+	applyMu.Unlock()
+	if runErr != nil {
+		log.Printf("reconcile failed: %v", runErr)
 	}
 
 	if err := <-webServerErrors; err != nil {
@@ -204,6 +223,9 @@ func startWebServer(address string, configPath string) (*http.Server, <-chan err
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = fmt.Fprintln(w, "ok")
+	})
+	mux.HandleFunc("/config", func(w http.ResponseWriter, r *http.Request) {
+		handleConfigUpload(w, r, configPath)
 	})
 	mux.HandleFunc("/ostree/upload", func(w http.ResponseWriter, r *http.Request) {
 		handleOstreeUpload(w, r, configPath)
@@ -234,6 +256,99 @@ func startWebServer(address string, configPath string) (*http.Server, <-chan err
 
 	log.Printf("webserver listening on %s", address)
 	return server, errCh, nil
+}
+
+// handleConfigUpload accepts a raw config.json document, validates it, writes
+// it atomically to the active config path, and converges the host to it (the
+// same reconcile that runs at startup). The validated body is what lands on
+// disk, so a successful upload becomes the new source of truth. Like the ostree
+// endpoints it is unauthenticated: anyone who can reach :8080 can rewrite the
+// node's folders, interfaces, firewall, and containers.
+func handleConfigUpload(w http.ResponseWriter, r *http.Request, configPath string) {
+	if r.Method != http.MethodPost && r.Method != http.MethodPut {
+		w.Header().Set("Allow", "POST, PUT")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	defer func() { _ = r.Body.Close() }()
+
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxConfigUploadBytes))
+	if err != nil {
+		http.Error(w, fmt.Sprintf("read config: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	var cfg Config
+	if err := json.Unmarshal(body, &cfg); err != nil {
+		http.Error(w, fmt.Sprintf("parse config: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	// Validate before touching disk so a rejected upload never replaces the
+	// config on disk and never partially applies.
+	if err := validateConfig(&cfg); err != nil {
+		http.Error(w, fmt.Sprintf("invalid config: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	// Hold applyMu across the write and the apply so a second upload, or the
+	// startup reconcile, cannot interleave with this convergence.
+	applyMu.Lock()
+	defer applyMu.Unlock()
+
+	if err := writeConfigFile(configPath, body); err != nil {
+		http.Error(w, fmt.Sprintf("save config: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// The config is now persisted. If the apply fails (for example firewalld is
+	// down) the saved config is still the desired state, so report the failure
+	// but leave it on disk for the next reconcile to retry.
+	if err := configApplier(&cfg); err != nil {
+		log.Printf("apply uploaded config failed: %v", err)
+		http.Error(w, fmt.Sprintf("config saved to %s but apply failed: %v", configPath, err), http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("config uploaded and applied to %s (%d bytes)", configPath, len(body))
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = fmt.Fprintf(w, "config saved to %s and applied\n", configPath)
+}
+
+// writeConfigFile writes the config body to a temp file in the destination
+// directory and renames it into place, so a crash mid-write can never leave a
+// truncated config where the next boot would load it.
+func writeConfigFile(path string, body []byte) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create config dir %q: %w", dir, err)
+	}
+
+	tmp, err := os.CreateTemp(dir, ".config-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }() // best-effort; a no-op once the rename succeeds
+
+	_, writeErr := tmp.Write(body)
+	closeErr := tmp.Close()
+	if writeErr != nil {
+		return fmt.Errorf("write config: %w", writeErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close config: %w", closeErr)
+	}
+
+	if err := os.Chmod(tmpName, 0o644); err != nil {
+		return fmt.Errorf("set config mode: %w", err)
+	}
+
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("finalize config: %w", err)
+	}
+
+	return nil
 }
 
 // handleOstreeUpload streams the request body to the configured upload path.
@@ -358,6 +473,15 @@ func run(configPath string) error {
 		return err
 	}
 
+	return applyConfig(cfg)
+}
+
+// applyConfig validates the desired node configuration and converges the host
+// to it: host folders, host interfaces, firewall ports, the Podman socket, and
+// the declared containers. Callers must hold applyMu so two convergence runs
+// (the startup reconcile and a concurrent /config upload) cannot interleave
+// host changes.
+func applyConfig(cfg *Config) error {
 	mode := PodmanMode(cfg.PodmanMode)
 	if mode == "" {
 		mode = PodmanRootful
@@ -435,6 +559,33 @@ func loadConfig(path string) (*Config, error) {
 }
 
 func validateConfig(cfg *Config) error {
+	for i, folder := range cfg.Folders {
+		folderLabel := folder.Path
+		if folderLabel == "" {
+			folderLabel = fmt.Sprintf("#%d", i)
+		}
+
+		if folder.Path == "" {
+			return fmt.Errorf("folder %s is missing path", folderLabel)
+		}
+		if folder.Chmod != "" {
+			if _, err := parseFileMode(folder.Chmod); err != nil {
+				return fmt.Errorf("invalid chmod %q for folder %s: %w", folder.Chmod, folderLabel, err)
+			}
+		}
+		if folder.User != "" {
+			if _, _, err := parseOwner(folder.User); err != nil {
+				return fmt.Errorf("invalid user %q for folder %s: %w", folder.User, folderLabel, err)
+			}
+		}
+	}
+
+	// buildNMState validates the interface config (names, paired ip/subnet,
+	// addresses within subnet, parseable gateway/DNS) without side effects.
+	if _, err := buildNMState(cfg.Interfaces); err != nil {
+		return err
+	}
+
 	for i, port := range cfg.FirewallPorts {
 		portLabel := strings.TrimSpace(port.Port)
 		if portLabel == "" {

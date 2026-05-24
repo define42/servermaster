@@ -69,7 +69,7 @@ Top-level fields in the JSON file:
 
 ### Interface object
 
-Host interface changes are applied on the host with netlink and `resolvectl`, so the process needs permission to change host networking.
+Host interface changes are applied declaratively through NetworkManager with `nmstatectl` (the `nmstate` package must be installed on the host). The generated desired state is written to `/etc/nmstate/servermaster.yml` and applied with `nmstatectl apply`, so the configuration persists across reboots and is reapplied by `nmstate.service`. DNS servers from all interfaces are merged into nmstate's single global resolver list. This replaces the older netlink/`resolvectl` path, which fought NetworkManager and required `systemd-resolved` (not enabled by default on RHEL/Red Hat Device Edge).
 
 - `name`: host interface name (for example `eth0`)
 - `ip_address`: static IP to assign to the host interface

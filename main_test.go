@@ -235,6 +235,100 @@ func TestParseInterfaceAddress(t *testing.T) {
 	}
 }
 
+func TestBuildNMState(t *testing.T) {
+	t.Run("static ipv4 with gateway and dns", func(t *testing.T) {
+		state, err := buildNMState([]InterfaceConfig{{
+			Name:      "eth0",
+			IPAddress: "192.168.1.10",
+			Subnet:    "192.168.1.0/24",
+			Gateway:   "192.168.1.1",
+			DNS:       []string{"1.1.1.1", "8.8.8.8"},
+		}})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if len(state.Interfaces) != 1 {
+			t.Fatalf("interfaces = %d, want 1", len(state.Interfaces))
+		}
+		iface := state.Interfaces[0]
+		if iface.Name != "eth0" || iface.Type != "ethernet" || iface.State != "up" {
+			t.Fatalf("interface metadata mismatch: %+v", iface)
+		}
+		if iface.IPv6 != nil {
+			t.Fatalf("ipv4 address should not populate ipv6 stack: %+v", iface.IPv6)
+		}
+		if iface.IPv4 == nil || !iface.IPv4.Enabled || iface.IPv4.DHCP {
+			t.Fatalf("ipv4 stack mismatch: %+v", iface.IPv4)
+		}
+		if got := iface.IPv4.Addresses[0]; got.IP != "192.168.1.10" || got.PrefixLength != 24 {
+			t.Fatalf("address = %+v, want 192.168.1.10/24", got)
+		}
+
+		if state.Routes == nil || len(state.Routes.Config) != 1 {
+			t.Fatalf("routes = %+v, want one default route", state.Routes)
+		}
+		route := state.Routes.Config[0]
+		if route.Destination != "0.0.0.0/0" || route.NextHopAddress != "192.168.1.1" || route.NextHopInterface != "eth0" {
+			t.Fatalf("route mismatch: %+v", route)
+		}
+
+		if state.DNSResolver == nil || !reflect.DeepEqual(state.DNSResolver.Config.Server, []string{"1.1.1.1", "8.8.8.8"}) {
+			t.Fatalf("dns = %+v, want [1.1.1.1 8.8.8.8]", state.DNSResolver)
+		}
+	})
+
+	t.Run("ipv6 gateway yields default v6 route", func(t *testing.T) {
+		state, err := buildNMState([]InterfaceConfig{{
+			Name:      "eth0",
+			IPAddress: "2001:db8::10",
+			Subnet:    "2001:db8::/64",
+			Gateway:   "2001:db8::1",
+		}})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if state.Interfaces[0].IPv4 != nil || state.Interfaces[0].IPv6 == nil {
+			t.Fatalf("ipv6 address should populate ipv6 stack only: %+v", state.Interfaces[0])
+		}
+		if got := state.Routes.Config[0].Destination; got != "::/0" {
+			t.Fatalf("route destination = %q, want ::/0", got)
+		}
+	})
+
+	t.Run("dns merged and de-duplicated across interfaces", func(t *testing.T) {
+		state, err := buildNMState([]InterfaceConfig{
+			{Name: "eth0", DNS: []string{"1.1.1.1", "8.8.8.8"}},
+			{Name: "eth1", DNS: []string{"8.8.8.8", "9.9.9.9"}},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !reflect.DeepEqual(state.DNSResolver.Config.Server, []string{"1.1.1.1", "8.8.8.8", "9.9.9.9"}) {
+			t.Fatalf("dns = %v, want deduped [1.1.1.1 8.8.8.8 9.9.9.9]", state.DNSResolver.Config.Server)
+		}
+	})
+
+	errorCases := []struct {
+		name  string
+		iface InterfaceConfig
+	}{
+		{"missing name", InterfaceConfig{IPAddress: "10.0.0.1", Subnet: "10.0.0.0/24"}},
+		{"ip without subnet", InterfaceConfig{Name: "eth0", IPAddress: "10.0.0.1"}},
+		{"subnet without ip", InterfaceConfig{Name: "eth0", Subnet: "10.0.0.0/24"}},
+		{"address outside subnet", InterfaceConfig{Name: "eth0", IPAddress: "10.1.0.1", Subnet: "10.0.0.0/24"}},
+		{"bad gateway", InterfaceConfig{Name: "eth0", Gateway: "not-an-ip"}},
+		{"bad dns", InterfaceConfig{Name: "eth0", DNS: []string{"not-an-ip"}}},
+	}
+	for _, tt := range errorCases {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := buildNMState([]InterfaceConfig{tt.iface}); err == nil {
+				t.Fatalf("buildNMState(%+v) expected error, got nil", tt.iface)
+			}
+		})
+	}
+}
+
 func TestContainerNeedsStop(t *testing.T) {
 	tests := []struct {
 		state string

@@ -24,7 +24,6 @@ import (
 	"github.com/containers/podman/v5/pkg/bindings"
 	systemd "github.com/coreos/go-systemd/v22/dbus"
 	dbus "github.com/godbus/dbus/v5"
-	"github.com/vishvananda/netlink"
 )
 
 type PodmanMode string
@@ -36,6 +35,11 @@ const (
 	defaultConfigPath       = "/data/config/containers.json"
 	webServerAddress        = ":8080"
 	defaultOstreeUploadPath = "/data/ostree/update.tar"
+
+	// nmstateStatePath is where the generated nmstate desired-state document is
+	// written before it is applied. The .yml extension (JSON is valid YAML) lets
+	// nmstate.service reapply it at boot in addition to the apply call below.
+	nmstateStatePath = "/etc/nmstate/servermaster.yml"
 
 	serviceName       = "servermaster.service"
 	serviceBinaryPath = "/usr/local/bin/servermaster"
@@ -1159,7 +1163,94 @@ func startContainer(ctx context.Context, nameOrID string) error {
 	return response.Process(nil)
 }
 
+// nmState is the subset of the nmstate desired-state schema this tool emits.
+// It is marshaled to JSON (valid YAML) and applied through NetworkManager with
+// `nmstatectl apply`, which is the Red Hat Device Edge-native, declarative,
+// reboot-persistent path. It replaces direct netlink calls (which fight
+// NetworkManager) and `resolvectl` (which needs systemd-resolved, not enabled
+// by default on RHEL).
+type nmState struct {
+	Interfaces  []nmInterface `json:"interfaces,omitempty"`
+	Routes      *nmRoutes     `json:"routes,omitempty"`
+	DNSResolver *nmDNS        `json:"dns-resolver,omitempty"`
+}
+
+type nmInterface struct {
+	Name  string     `json:"name"`
+	Type  string     `json:"type"`
+	State string     `json:"state"`
+	IPv4  *nmIPStack `json:"ipv4,omitempty"`
+	IPv6  *nmIPStack `json:"ipv6,omitempty"`
+}
+
+type nmIPStack struct {
+	Enabled   bool        `json:"enabled"`
+	DHCP      bool        `json:"dhcp"`
+	Addresses []nmAddress `json:"address,omitempty"`
+}
+
+type nmAddress struct {
+	IP           string `json:"ip"`
+	PrefixLength int    `json:"prefix-length"`
+}
+
+type nmRoutes struct {
+	Config []nmRoute `json:"config"`
+}
+
+type nmRoute struct {
+	Destination      string `json:"destination"`
+	NextHopAddress   string `json:"next-hop-address"`
+	NextHopInterface string `json:"next-hop-interface"`
+}
+
+type nmDNS struct {
+	Config nmDNSConfig `json:"config"`
+}
+
+type nmDNSConfig struct {
+	Server []string `json:"server,omitempty"`
+}
+
 func configureHostInterfaces(interfaces []InterfaceConfig) error {
+	if len(interfaces) == 0 {
+		return nil
+	}
+
+	state, err := buildNMState(interfaces)
+	if err != nil {
+		return err
+	}
+
+	document, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal nmstate document failed: %w", err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(nmstateStatePath), 0o755); err != nil {
+		return fmt.Errorf("create nmstate dir %q failed: %w", filepath.Dir(nmstateStatePath), err)
+	}
+	if err := os.WriteFile(nmstateStatePath, document, 0o644); err != nil {
+		return fmt.Errorf("write nmstate document %q failed: %w", nmstateStatePath, err)
+	}
+
+	if err := runCommand("nmstatectl", "apply", nmstateStatePath); err != nil {
+		return fmt.Errorf("apply host interface configuration failed: %w", err)
+	}
+
+	return nil
+}
+
+// buildNMState translates the tool's interface config into an nmstate desired
+// state. It keeps the original validation (name required, ip_address/subnet
+// paired, addresses inside their subnet, parseable gateway/DNS). DNS servers
+// from every interface are merged into nmstate's single global resolver list,
+// de-duplicated in first-seen order.
+func buildNMState(interfaces []InterfaceConfig) (*nmState, error) {
+	state := &nmState{}
+	var dnsServers []string
+	seenDNS := make(map[string]struct{})
+
 	for i, iface := range interfaces {
 		ifaceLabel := iface.Name
 		if ifaceLabel == "" {
@@ -1167,71 +1258,79 @@ func configureHostInterfaces(interfaces []InterfaceConfig) error {
 		}
 
 		if iface.Name == "" {
-			return fmt.Errorf("host interface %s is missing name", ifaceLabel)
-		}
-
-		link, err := netlink.LinkByName(iface.Name)
-		if err != nil {
-			return fmt.Errorf("host interface %q not found: %w", iface.Name, err)
+			return nil, fmt.Errorf("host interface %s is missing name", ifaceLabel)
 		}
 
 		if (iface.IPAddress == "") != (iface.Subnet == "") {
-			return fmt.Errorf("host interface %q must set both ip_address and subnet", iface.Name)
+			return nil, fmt.Errorf("host interface %q must set both ip_address and subnet", iface.Name)
 		}
+
+		// Existing physical NICs (the documented use case, e.g. eth0). Bonds,
+		// VLANs, and bridges are out of scope for this schema.
+		nmIface := nmInterface{Name: iface.Name, Type: "ethernet", State: "up"}
 
 		if iface.IPAddress != "" {
 			ipNet, err := parseInterfaceAddress(iface.IPAddress, iface.Subnet)
 			if err != nil {
-				return fmt.Errorf("invalid host interface %s address: %w", ifaceLabel, err)
+				return nil, fmt.Errorf("invalid host interface %s address: %w", ifaceLabel, err)
 			}
 
-			if err := netlink.AddrReplace(link, &netlink.Addr{IPNet: ipNet}); err != nil {
-				return fmt.Errorf("configure address for host interface %q failed: %w", iface.Name, err)
+			prefix, _ := ipNet.Mask.Size()
+			stack := &nmIPStack{
+				Enabled:   true,
+				DHCP:      false,
+				Addresses: []nmAddress{{IP: ipNet.IP.String(), PrefixLength: prefix}},
+			}
+			if ipNet.IP.To4() != nil {
+				nmIface.IPv4 = stack
+			} else {
+				nmIface.IPv6 = stack
 			}
 		}
 
-		if err := netlink.LinkSetUp(link); err != nil {
-			return fmt.Errorf("bring up host interface %q failed: %w", iface.Name, err)
-		}
+		state.Interfaces = append(state.Interfaces, nmIface)
 
 		if iface.Gateway != "" {
 			gateway, err := parseAddr(iface.Gateway)
 			if err != nil {
-				return fmt.Errorf("invalid gateway %q for host interface %s", iface.Gateway, ifaceLabel)
+				return nil, fmt.Errorf("invalid gateway %q for host interface %s", iface.Gateway, ifaceLabel)
 			}
 
-			route := netlink.Route{
-				LinkIndex: link.Attrs().Index,
-				Gw:        gateway,
-			}
+			destination := "0.0.0.0/0"
 			if gateway.To4() == nil {
-				route.Family = netlink.FAMILY_V6
-			} else {
-				route.Family = netlink.FAMILY_V4
+				destination = "::/0"
 			}
 
-			if err := netlink.RouteReplace(&route); err != nil {
-				return fmt.Errorf("configure default route for host interface %q failed: %w", iface.Name, err)
+			if state.Routes == nil {
+				state.Routes = &nmRoutes{}
 			}
+			state.Routes.Config = append(state.Routes.Config, nmRoute{
+				Destination:      destination,
+				NextHopAddress:   gateway.String(),
+				NextHopInterface: iface.Name,
+			})
 		}
 
-		if len(iface.DNS) > 0 {
-			args := []string{"dns", iface.Name}
-			for _, dns := range iface.DNS {
-				dnsIP, err := parseAddr(dns)
-				if err != nil {
-					return fmt.Errorf("invalid dns server %q for host interface %s", dns, ifaceLabel)
-				}
-				args = append(args, dnsIP.String())
+		for _, dns := range iface.DNS {
+			dnsIP, err := parseAddr(dns)
+			if err != nil {
+				return nil, fmt.Errorf("invalid dns server %q for host interface %s", dns, ifaceLabel)
 			}
 
-			if err := runCommand("resolvectl", args...); err != nil {
-				return fmt.Errorf("configure DNS for host interface %q failed: %w", iface.Name, err)
+			key := dnsIP.String()
+			if _, seen := seenDNS[key]; seen {
+				continue
 			}
+			seenDNS[key] = struct{}{}
+			dnsServers = append(dnsServers, key)
 		}
 	}
 
-	return nil
+	if len(dnsServers) > 0 {
+		state.DNSResolver = &nmDNS{Config: nmDNSConfig{Server: dnsServers}}
+	}
+
+	return state, nil
 }
 
 func parseInterfaceAddress(address string, subnet string) (*net.IPNet, error) {

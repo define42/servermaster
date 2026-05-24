@@ -6,7 +6,6 @@ require (
 	github.com/containers/podman/v5 v5.8.2
 	github.com/coreos/go-systemd/v22 v22.7.0
 	github.com/godbus/dbus/v5 v5.2.2
-	github.com/vishvananda/netlink v1.3.1
 )
 
 require (
@@ -29,7 +28,6 @@ require (
 	github.com/pkg/sftp v1.13.9 // indirect
 	github.com/sirupsen/logrus v1.9.4 // indirect
 	github.com/skeema/knownhosts v1.3.2 // indirect
-	github.com/vishvananda/netns v0.0.5 // indirect
 	go.podman.io/common v0.67.1 // indirect
 	go.podman.io/storage v1.62.0 // indirect
 	golang.org/x/crypto v0.52.0 // indirect

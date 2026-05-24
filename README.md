@@ -105,7 +105,12 @@ management network.
 
 - the node's current `hostname`
 - ostree/bootc deployment information
-- free disk space
+- free disk space, one entry per real disk-backed filesystem (tmpfs and other
+  virtual filesystems are excluded; a filesystem mounted at several paths is
+  reported once)
+- `memory`: total, free, available, and used RAM (bytes) plus used percent
+- `cpu`: core count and current utilization percent (sampled briefly from
+  `/proc/stat`)
 - live network configuration for every host interface (read from the kernel via
   netlink: addresses, routes, and link state for all interfaces, not just managed
   ones, plus resolver nameservers from `/etc/resolv.conf`)

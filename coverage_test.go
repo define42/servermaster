@@ -192,6 +192,168 @@ func TestDiskStatusForPathError(t *testing.T) {
 	}
 }
 
+// --- memory ----------------------------------------------------------------
+
+func TestReadMeminfo(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "meminfo")
+	content := "MemTotal:       2048 kB\nMemFree:         512 kB\nHugePages_Total:       0\nweird line\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write meminfo: %v", err)
+	}
+
+	values, err := readMeminfo(path)
+	if err != nil {
+		t.Fatalf("readMeminfo: %v", err)
+	}
+	if values["MemTotal"] != 2048*1024 || values["MemFree"] != 512*1024 {
+		t.Fatalf("scaled values = %v", values)
+	}
+	if values["HugePages_Total"] != 0 { // no kB suffix -> not scaled
+		t.Fatalf("HugePages_Total = %d, want 0", values["HugePages_Total"])
+	}
+	if _, err := readMeminfo(filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Fatal("expected error reading a missing meminfo file")
+	}
+}
+
+func TestCollectMemoryStatus(t *testing.T) {
+	prev := procMeminfoPath
+	defer func() { procMeminfoPath = prev }()
+
+	path := filepath.Join(t.TempDir(), "meminfo")
+	if err := os.WriteFile(path, []byte("MemTotal: 1000 kB\nMemFree: 200 kB\nMemAvailable: 400 kB\n"), 0o600); err != nil {
+		t.Fatalf("write meminfo: %v", err)
+	}
+	procMeminfoPath = path
+
+	m := collectMemoryStatus()
+	if m.Error != "" {
+		t.Fatalf("unexpected error: %s", m.Error)
+	}
+	if m.TotalBytes != 1000*1024 || m.FreeBytes != 200*1024 || m.AvailableBytes != 400*1024 {
+		t.Fatalf("memory = %+v", m)
+	}
+	if m.UsedBytes != 600*1024 || m.UsedPercent != 60 {
+		t.Fatalf("used = %d (%v%%), want 600 kB (60%%)", m.UsedBytes, m.UsedPercent)
+	}
+
+	// Without MemAvailable, used is derived from MemFree.
+	noAvail := filepath.Join(t.TempDir(), "meminfo2")
+	if err := os.WriteFile(noAvail, []byte("MemTotal: 1000 kB\nMemFree: 300 kB\n"), 0o600); err != nil {
+		t.Fatalf("write meminfo: %v", err)
+	}
+	procMeminfoPath = noAvail
+	if m := collectMemoryStatus(); m.AvailableBytes != 300*1024 || m.UsedBytes != 700*1024 {
+		t.Fatalf("fallback memory = %+v", m)
+	}
+}
+
+func TestCollectMemoryStatusErrors(t *testing.T) {
+	prev := procMeminfoPath
+	defer func() { procMeminfoPath = prev }()
+
+	procMeminfoPath = filepath.Join(t.TempDir(), "missing")
+	if m := collectMemoryStatus(); m.Error == "" {
+		t.Fatal("expected error when meminfo is unreadable")
+	}
+
+	noTotal := filepath.Join(t.TempDir(), "meminfo")
+	if err := os.WriteFile(noTotal, []byte("MemFree: 100 kB\n"), 0o600); err != nil {
+		t.Fatalf("write meminfo: %v", err)
+	}
+	procMeminfoPath = noTotal
+	if m := collectMemoryStatus(); m.Error == "" {
+		t.Fatal("expected error when MemTotal is absent")
+	}
+}
+
+// --- cpu -------------------------------------------------------------------
+
+func TestReadCPUTimes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "stat")
+	// total = 100+20+30+800+50 = 1000; idle = idle(800) + iowait(50) = 850
+	content := "cpu  100 20 30 800 50 0 0 0 0 0\ncpu0 50 10 15 400 25 0 0\nintr 12345\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write stat: %v", err)
+	}
+
+	ct, err := readCPUTimes(path)
+	if err != nil {
+		t.Fatalf("readCPUTimes: %v", err)
+	}
+	if ct.total != 1000 || ct.idle != 850 {
+		t.Fatalf("cpuTimes = %+v, want {idle:850 total:1000}", ct)
+	}
+
+	if _, err := readCPUTimes(filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Fatal("expected error reading a missing stat file")
+	}
+
+	noAgg := filepath.Join(t.TempDir(), "stat-noagg")
+	if err := os.WriteFile(noAgg, []byte("intr 1 2 3\nctxt 99\n"), 0o600); err != nil {
+		t.Fatalf("write stat: %v", err)
+	}
+	if _, err := readCPUTimes(noAgg); err == nil {
+		t.Fatal("expected error when there is no aggregate cpu line")
+	}
+
+	badField := filepath.Join(t.TempDir(), "stat-bad")
+	if err := os.WriteFile(badField, []byte("cpu  100 20 30 xx 50\n"), 0o600); err != nil {
+		t.Fatalf("write stat: %v", err)
+	}
+	if _, err := readCPUTimes(badField); err == nil {
+		t.Fatal("expected error for a non-numeric cpu field")
+	}
+}
+
+func TestCPUUsedPercent(t *testing.T) {
+	// totalDelta = 100, idleDelta = 50 -> busy 50 -> 50%
+	if got := cpuUsedPercent(cpuTimes{idle: 850, total: 1000}, cpuTimes{idle: 900, total: 1100}); got != 50 {
+		t.Fatalf("usedPercent = %v, want 50", got)
+	}
+	if got := cpuUsedPercent(cpuTimes{total: 1000}, cpuTimes{total: 1000}); got != 0 {
+		t.Fatalf("no delta usedPercent = %v, want 0", got)
+	}
+	if got := cpuUsedPercent(cpuTimes{idle: 0, total: 100}, cpuTimes{idle: 200, total: 150}); got != 0 {
+		t.Fatalf("idle>total guard usedPercent = %v, want 0", got)
+	}
+}
+
+func TestCollectCPUStatus(t *testing.T) {
+	prev := procStatPath
+	defer func() { procStatPath = prev }()
+
+	path := filepath.Join(t.TempDir(), "stat")
+	if err := os.WriteFile(path, []byte("cpu  100 0 50 800 50 0 0 0 0 0\ncpu0 50 0 25 400 25\n"), 0o600); err != nil {
+		t.Fatalf("write stat: %v", err)
+	}
+	procStatPath = path
+
+	// A cancelled context skips the sample sleep, keeping the test fast; with a
+	// static fixture the two reads match, so utilization is 0.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	st := collectCPUStatus(ctx)
+	if st.Error != "" {
+		t.Fatalf("unexpected error: %s", st.Error)
+	}
+	if st.Cores < 1 {
+		t.Fatalf("cores = %d, want >= 1", st.Cores)
+	}
+	if st.UsedPercent != 0 {
+		t.Fatalf("usedPercent = %v, want 0 for a static sample", st.UsedPercent)
+	}
+}
+
+func TestCollectCPUStatusReadError(t *testing.T) {
+	prev := procStatPath
+	defer func() { procStatPath = prev }()
+	procStatPath = filepath.Join(t.TempDir(), "missing")
+	if st := collectCPUStatus(context.Background()); st.Error == "" {
+		t.Fatal("expected error when /proc/stat is unreadable")
+	}
+}
+
 // --- folders / ownership ---------------------------------------------------
 
 func TestEnsureFoldersAppliesModeAndOwner(t *testing.T) {

@@ -25,6 +25,7 @@ import (
 	"os/exec"
 	osuser "os/user"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -115,6 +116,15 @@ var nmstateStatePath = "/etc/nmstate/servermaster.yml"
 //
 //nolint:gochecknoglobals // injectable seam so disk enumeration can be tested with a fixture.
 var procMountsPath = "/proc/mounts"
+
+// procMeminfoPath and procStatPath are the kernel's memory and CPU statistics
+// files. They are variables so tests can supply fixtures instead of live /proc.
+//
+//nolint:gochecknoglobals // injectable seams so memory/CPU collection can be tested with fixtures.
+var (
+	procMeminfoPath = "/proc/meminfo"
+	procStatPath    = "/proc/stat"
+)
 
 // logRing is a bounded, concurrency-safe buffer of the most recent log lines. It
 // is an io.Writer, so installing it as (part of) the standard logger's output
@@ -297,10 +307,32 @@ type servermasterStatus struct {
 	Hostname        string                   `json:"hostname,omitempty"`
 	Ostree          ostreeStatus             `json:"ostree"`
 	FreeDiskSpace   []diskStatus             `json:"free_diskspace"`
+	Memory          memoryStatus             `json:"memory"`
+	CPU             cpuStatus                `json:"cpu"`
 	Network         networkStatus            `json:"network"`
 	Containers      []runningContainerStatus `json:"containers"`
 	ServermasterLog []string                 `json:"servermaster_log"`
 	Errors          []string                 `json:"errors,omitempty"`
+}
+
+// memoryStatus is the host's RAM usage, read from /proc/meminfo. AvailableBytes
+// is the kernel's estimate of memory obtainable without swapping (the meaningful
+// "free" figure); UsedBytes/UsedPercent are derived from it.
+type memoryStatus struct {
+	TotalBytes     uint64  `json:"total_bytes"`
+	FreeBytes      uint64  `json:"free_bytes"`
+	AvailableBytes uint64  `json:"available_bytes"`
+	UsedBytes      uint64  `json:"used_bytes"`
+	UsedPercent    float64 `json:"used_percent"`
+	Error          string  `json:"error,omitempty"`
+}
+
+// cpuStatus is the host's CPU count and current utilization. UsedPercent is the
+// busy fraction sampled over a short interval from /proc/stat.
+type cpuStatus struct {
+	Cores       int     `json:"cores"`
+	UsedPercent float64 `json:"used_percent"`
+	Error       string  `json:"error,omitempty"`
 }
 
 // networkStatus is the live network configuration of every host interface, read
@@ -533,6 +565,16 @@ func collectServermasterStatus(ctx context.Context, configPath string) servermas
 		status.Errors = append(status.Errors, fmt.Sprintf("disk: %v", err))
 	}
 
+	status.Memory = collectMemoryStatus()
+	if status.Memory.Error != "" {
+		status.Errors = append(status.Errors, fmt.Sprintf("memory: %s", status.Memory.Error))
+	}
+
+	status.CPU = collectCPUStatus(ctx)
+	if status.CPU.Error != "" {
+		status.Errors = append(status.Errors, fmt.Sprintf("cpu: %s", status.CPU.Error))
+	}
+
 	network := collectNetworkStatus(ctx)
 	if network.Error != "" {
 		status.Errors = append(status.Errors, fmt.Sprintf("network: %s", network.Error))
@@ -544,12 +586,7 @@ func collectServermasterStatus(ctx context.Context, configPath string) servermas
 		status.Errors = append(status.Errors, fmt.Sprintf("containers: %v", err))
 	}
 	status.Containers = containers
-
-	for _, container := range containers {
-		if container.Error != "" {
-			status.Errors = append(status.Errors, fmt.Sprintf("container %s: %s", container.Name, container.Error))
-		}
-	}
+	status.Errors = append(status.Errors, containerStatusErrors(containers)...)
 
 	// Captured after the other collectors so their log output is reflected.
 	status.ServermasterLog = serviceLog.snapshot()
@@ -559,6 +596,18 @@ func collectServermasterStatus(ctx context.Context, configPath string) servermas
 	}
 
 	return status
+}
+
+// containerStatusErrors returns one "container <name>: <error>" message for each
+// container that reported an error during status collection.
+func containerStatusErrors(containers []runningContainerStatus) []string {
+	var msgs []string
+	for _, container := range containers {
+		if container.Error != "" {
+			msgs = append(msgs, fmt.Sprintf("container %s: %s", container.Name, container.Error))
+		}
+	}
+	return msgs
 }
 
 // collectDiskStatuses reports free space for each real, disk-backed filesystem
@@ -659,6 +708,144 @@ func diskStatusForPath(path string) (diskStatus, error) {
 		UsedBytes:      used,
 		UsedPercent:    usedPercent,
 	}, nil
+}
+
+// collectMemoryStatus reports host RAM usage from /proc/meminfo. UsedBytes is
+// derived from MemAvailable (memory obtainable without swapping), falling back
+// to MemFree on kernels too old to report MemAvailable.
+func collectMemoryStatus() memoryStatus {
+	values, err := readMeminfo(procMeminfoPath)
+	if err != nil {
+		return memoryStatus{Error: err.Error()}
+	}
+
+	total := values["MemTotal"]
+	if total == 0 {
+		return memoryStatus{Error: "meminfo reported no MemTotal"}
+	}
+	free := values["MemFree"]
+	available, ok := values["MemAvailable"]
+	if !ok {
+		available = free
+	}
+
+	used := uint64(0)
+	if total > available {
+		used = total - available
+	}
+
+	return memoryStatus{
+		TotalBytes:     total,
+		FreeBytes:      free,
+		AvailableBytes: available,
+		UsedBytes:      used,
+		UsedPercent:    float64(used) / float64(total) * 100,
+	}
+}
+
+// readMeminfo parses a /proc/meminfo-formatted file into a map of field name to
+// bytes (the file reports kibibytes, which are scaled up here).
+func readMeminfo(path string) (map[string]uint64, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // path is the fixed procMeminfoPath (overridable only by tests), not request input.
+	if err != nil {
+		return nil, fmt.Errorf("read meminfo %q: %w", path, err)
+	}
+
+	values := make(map[string]uint64)
+	for _, line := range strings.Split(string(data), "\n") {
+		key, rest, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		fields := strings.Fields(rest)
+		if len(fields) == 0 {
+			continue
+		}
+		value, err := strconv.ParseUint(fields[0], 10, 64)
+		if err != nil {
+			continue
+		}
+		if len(fields) >= 2 && fields[1] == "kB" {
+			value *= 1024
+		}
+		values[key] = value
+	}
+	return values, nil
+}
+
+// cpuSampleInterval is how long collectCPUStatus waits between /proc/stat reads
+// so UsedPercent reflects current load rather than the average since boot.
+const cpuSampleInterval = 100 * time.Millisecond
+
+// cpuTimes holds the idle (idle + iowait) and total jiffies from /proc/stat.
+type cpuTimes struct {
+	idle  uint64
+	total uint64
+}
+
+// collectCPUStatus reports the CPU count and current utilization, sampling
+// /proc/stat across cpuSampleInterval.
+func collectCPUStatus(ctx context.Context) cpuStatus {
+	status := cpuStatus{Cores: runtime.NumCPU()}
+
+	before, err := readCPUTimes(procStatPath)
+	if err != nil {
+		status.Error = err.Error()
+		return status
+	}
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(cpuSampleInterval):
+	}
+
+	after, err := readCPUTimes(procStatPath)
+	if err != nil {
+		status.Error = err.Error()
+		return status
+	}
+
+	status.UsedPercent = cpuUsedPercent(before, after)
+	return status
+}
+
+// readCPUTimes parses the aggregate "cpu" line of a /proc/stat-formatted file.
+// Idle is the idle plus iowait columns; total is the sum of every column.
+func readCPUTimes(path string) (cpuTimes, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // path is the fixed procStatPath (overridable only by tests), not request input.
+	if err != nil {
+		return cpuTimes{}, fmt.Errorf("read cpu stat %q: %w", path, err)
+	}
+
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 5 || fields[0] != "cpu" {
+			continue
+		}
+		var times cpuTimes
+		for i, field := range fields[1:] {
+			value, err := strconv.ParseUint(field, 10, 64)
+			if err != nil {
+				return cpuTimes{}, fmt.Errorf("parse cpu stat field %q: %w", field, err)
+			}
+			times.total += value
+			if i == 3 || i == 4 { // the idle and iowait columns
+				times.idle += value
+			}
+		}
+		return times, nil
+	}
+	return cpuTimes{}, fmt.Errorf("no aggregate cpu line in %q", path)
+}
+
+// cpuUsedPercent is the busy fraction between two /proc/stat samples.
+func cpuUsedPercent(before, after cpuTimes) float64 {
+	totalDelta := after.total - before.total
+	idleDelta := after.idle - before.idle
+	if totalDelta == 0 || idleDelta > totalDelta {
+		return 0
+	}
+	return float64(totalDelta-idleDelta) / float64(totalDelta) * 100
 }
 
 // handleConfigUpload accepts a raw config.json document, validates it, writes

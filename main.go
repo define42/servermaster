@@ -102,6 +102,11 @@ type VolumeConfig struct {
 	HostPath      string `json:"host_path"`
 	ContainerPath string `json:"container_path"`
 	ReadOnly      bool   `json:"read_only"`
+	// SELinux selects the Podman relabel option for the bind mount: "z" for a
+	// shared label (multiple containers may use the source) or "Z" for a
+	// private label. Required on SELinux-enforcing hosts (Red Hat Device Edge
+	// defaults to enforcing) or the container is denied access to the source.
+	SELinux string `json:"selinux"`
 }
 
 type containerSpec struct {
@@ -460,9 +465,24 @@ func validateConfig(cfg *Config) error {
 				return fmt.Errorf("container %q has invalid container_port %d: %w", c.Name, p.ContainerPort, err)
 			}
 		}
+
+		for _, v := range c.Volumes {
+			if err := validateSELinuxRelabel(v.SELinux); err != nil {
+				return fmt.Errorf("container %q volume %q: %w", c.Name, v.ContainerPath, err)
+			}
+		}
 	}
 
 	return nil
+}
+
+func validateSELinuxRelabel(value string) error {
+	switch strings.TrimSpace(value) {
+	case "", "z", "Z":
+		return nil
+	default:
+		return fmt.Errorf(`selinux must be "z", "Z", or empty`)
+	}
 }
 
 func validateContainerPort(port int) error {
@@ -897,6 +917,10 @@ func createSpec(c ContainerConfig) (*containerSpec, error) {
 			options = append(options, "ro")
 		} else {
 			options = append(options, "rw")
+		}
+
+		if relabel := strings.TrimSpace(v.SELinux); relabel != "" {
+			options = append(options, relabel)
 		}
 
 		s.Mounts = append(s.Mounts, mount{

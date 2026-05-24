@@ -62,7 +62,8 @@
         {
           "host_path": "/data/web",
           "container_path": "/usr/share/nginx/html",
-          "read_only": true
+          "read_only": true,
+          "selinux": "Z"
         }
       ],
       "restart": "always"

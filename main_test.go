@@ -119,6 +119,30 @@ func TestValidateFirewallProtocol(t *testing.T) {
 	}
 }
 
+func TestValidateSELinuxRelabel(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		wantErr bool
+	}{
+		{"empty ok", "", false},
+		{"shared", "z", false},
+		{"private", "Z", false},
+		{"trims whitespace", " Z ", false},
+		{"case sensitive", "zZ", true},
+		{"not a relabel option", "ro", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateSELinuxRelabel(tt.value)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validateSELinuxRelabel(%q) error = %v, wantErr %v", tt.value, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestParseFileMode(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -293,7 +317,7 @@ func TestCreateSpec(t *testing.T) {
 			{HostIP: "127.0.0.1", HostPort: 9000, ContainerPort: 9000, Protocol: "udp"},
 		},
 		Volumes: []VolumeConfig{
-			{HostPath: "/data/web", ContainerPath: "/usr/share/nginx/html", ReadOnly: true},
+			{HostPath: "/data/web", ContainerPath: "/usr/share/nginx/html", ReadOnly: true, SELinux: "Z"},
 			{HostPath: "/data/cache", ContainerPath: "/cache", ReadOnly: false},
 		},
 		Restart: "always",
@@ -318,8 +342,8 @@ func TestCreateSpec(t *testing.T) {
 		t.Fatalf("explicit protocol should be preserved, got %q", spec.PortMappings[1].Protocol)
 	}
 
-	if !reflect.DeepEqual(spec.Mounts[0].Options, []string{"rbind", "ro"}) {
-		t.Fatalf("read-only mount options = %v, want [rbind ro]", spec.Mounts[0].Options)
+	if !reflect.DeepEqual(spec.Mounts[0].Options, []string{"rbind", "ro", "Z"}) {
+		t.Fatalf("read-only mount options = %v, want [rbind ro Z]", spec.Mounts[0].Options)
 	}
 	if !reflect.DeepEqual(spec.Mounts[1].Options, []string{"rbind", "rw"}) {
 		t.Fatalf("read-write mount options = %v, want [rbind rw]", spec.Mounts[1].Options)
@@ -381,6 +405,13 @@ func TestValidateConfig(t *testing.T) {
 			name: "bad firewall protocol",
 			cfg:  &Config{FirewallPorts: []FirewallPortConfig{{Port: "8080", Protocol: "icmp"}}},
 			want: "protocol",
+		},
+		{
+			name: "bad selinux relabel",
+			cfg: &Config{Containers: []ContainerConfig{
+				{Name: "web", Image: "nginx", Volumes: []VolumeConfig{{HostPath: "/data", ContainerPath: "/data", SELinux: "x"}}},
+			}},
+			want: "selinux",
 		},
 	}
 

@@ -113,6 +113,7 @@ Firewall ports are opened with `github.com/godbus/dbus/v5` against firewalld's r
 - `host_path`: source path on host
 - `container_path`: target path in container
 - `read_only`: whether mount is read-only
+- `selinux`: optional Podman relabel option for the bind mount — `z` (shared label) or `Z` (private label). On SELinux-enforcing hosts (Red Hat Device Edge defaults to enforcing) an unlabeled host path is denied to the container, so set this unless the path is already labeled `container_file_t`.
 
 ## Example config
 

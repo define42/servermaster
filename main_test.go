@@ -260,6 +260,87 @@ func TestParseOwner(t *testing.T) {
 	}
 }
 
+func TestDecodeFileContent(t *testing.T) {
+	tests := []struct {
+		name    string
+		file    FileConfig
+		want    string
+		wantErr bool
+	}{
+		{"empty encoding is plain", FileConfig{Content: "Hello, world!\n"}, "Hello, world!\n", false},
+		{"explicit plain", FileConfig{Content: "abc", Encoding: "plain"}, "abc", false},
+		{"trims encoding whitespace", FileConfig{Content: "abc", Encoding: " plain "}, "abc", false},
+		{"base64", FileConfig{Content: "SGVsbG8=", Encoding: "base64"}, "Hello", false},
+		{"empty plain content", FileConfig{}, "", false},
+		{"bad base64", FileConfig{Content: "not!base64", Encoding: "base64"}, "", true},
+		{"unknown encoding", FileConfig{Content: "abc", Encoding: "rot13"}, "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := decodeFileContent(tt.file)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("decodeFileContent error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if err == nil && string(got) != tt.want {
+				t.Fatalf("decodeFileContent = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEnsureFiles(t *testing.T) {
+	dir := t.TempDir()
+
+	plainPath := filepath.Join(dir, "nested", "hello")
+	files := []FileConfig{
+		{Path: plainPath, Chmod: "0640", Content: "Hello, world!\n"},
+		{Path: filepath.Join(dir, "raw"), Encoding: "base64", Content: "SGk="},
+	}
+
+	if err := ensureFiles(files); err != nil {
+		t.Fatalf("ensureFiles: %v", err)
+	}
+
+	// Parent directories are created, content is written, and mode is exact.
+	got, err := os.ReadFile(plainPath)
+	if err != nil {
+		t.Fatalf("read written file: %v", err)
+	}
+	if string(got) != "Hello, world!\n" {
+		t.Fatalf("content = %q, want %q", got, "Hello, world!\n")
+	}
+	info, err := os.Stat(plainPath)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Mode().Perm() != 0o640 {
+		t.Fatalf("mode = %o, want 640", info.Mode().Perm())
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, "raw"))
+	if err != nil {
+		t.Fatalf("read base64 file: %v", err)
+	}
+	if string(raw) != "Hi" {
+		t.Fatalf("base64 content = %q, want %q", raw, "Hi")
+	}
+
+	// Rewriting is idempotent and overwrites prior content.
+	files[0].Content = "changed\n"
+	if err := ensureFiles(files[:1]); err != nil {
+		t.Fatalf("ensureFiles rewrite: %v", err)
+	}
+	if got, _ := os.ReadFile(plainPath); string(got) != "changed\n" {
+		t.Fatalf("rewrite content = %q, want %q", got, "changed\n")
+	}
+
+	t.Run("missing path", func(t *testing.T) {
+		if err := ensureFiles([]FileConfig{{Content: "x"}}); err == nil {
+			t.Fatal("expected error for missing path")
+		}
+	})
+}
+
 func TestParseInterfaceAddress(t *testing.T) {
 	t.Run("valid", func(t *testing.T) {
 		ipNet, err := parseInterfaceAddress("192.168.1.10", "192.168.1.0/24")
@@ -823,6 +904,26 @@ func TestValidateConfig(t *testing.T) {
 			name: "folder bad chmod",
 			cfg:  &Config{Folders: []FolderConfig{{Path: "/data", Chmod: "99999"}}},
 			want: "chmod",
+		},
+		{
+			name: "file missing path",
+			cfg:  &Config{Files: []FileConfig{{Content: "hi"}}},
+			want: "missing path",
+		},
+		{
+			name: "file bad chmod",
+			cfg:  &Config{Files: []FileConfig{{Path: "/data/x", Chmod: "99999"}}},
+			want: "chmod",
+		},
+		{
+			name: "file bad encoding",
+			cfg:  &Config{Files: []FileConfig{{Path: "/data/x", Encoding: "rot13"}}},
+			want: "encoding",
+		},
+		{
+			name: "file bad base64",
+			cfg:  &Config{Files: []FileConfig{{Path: "/data/x", Encoding: "base64", Content: "not!base64"}}},
+			want: "base64",
 		},
 		{
 			name: "interface bad gateway",

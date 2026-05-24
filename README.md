@@ -1,9 +1,9 @@
 # servermaster
 
 `servermaster` is a Go service for declaratively configuring a Red Hat Device
-Edge node without MicroShift. It manages host folders, host network interfaces,
-firewalld ports, OS update staging, and Podman containers directly from one JSON
-configuration file.
+Edge node without MicroShift. It manages host folders, host files, host network
+interfaces, firewalld ports, OS update staging, and Podman containers directly
+from one JSON configuration file.
 
 The active config file is the source of truth for the node. On every reconcile,
 `servermaster` stops any running container that is not declared in that config.
@@ -17,16 +17,18 @@ On startup, and after a successful remote config upload, `servermaster`:
 1. Starts an HTTP server on `:8080`.
 2. Reads the active JSON config file.
 3. Creates declared host folders with the requested mode and owner.
-4. Applies declared host interface settings through `nmstatectl`.
-5. Starts `firewalld.service`, opens declared firewalld ports in runtime and
+4. Writes declared files (creating parent directories) with the requested mode
+   and owner.
+5. Applies declared host interface settings through `nmstatectl`.
+6. Starts `firewalld.service`, opens declared firewalld ports in runtime and
    permanent configuration, then closes any undeclared port and removes every
    firewalld service (ports become the only way anything is open).
-6. Starts the rootful `podman.socket` through systemd.
-7. Waits for the Podman Unix socket to become reachable.
-8. Stops running containers that are not declared in the config.
-9. For each declared container, leaves it running untouched if it is already
-   running with an unchanged configuration; otherwise pulls the image and
-   (re)creates and starts it from the desired spec.
+7. Starts the rootful `podman.socket` through systemd.
+8. Waits for the Podman Unix socket to become reachable.
+9. Stops running containers that are not declared in the config.
+10. For each declared container, leaves it running untouched if it is already
+    running with an unchanged configuration; otherwise pulls the image and
+    (re)creates and starts it from the desired spec.
 
 ## Usage
 
@@ -162,6 +164,30 @@ Top-level fields:
 - `path`: host folder path that must exist
 - `chmod`: optional octal permissions string, for example `0755`
 - `user`: optional owner as `user`, `uid`, `user:group`, or `uid:gid`
+
+### Files
+
+Declared files are written on every reconcile, after folders, with their parent
+directories created as needed. Content comes from the config itself.
+
+- `path`: host file path to write
+- `content`: file contents
+- `encoding`: how `content` is interpreted — `plain` (default) for literal text,
+  or `base64` for base64-encoded bytes (use this for binary content)
+- `chmod`: optional octal permissions string, for example `0755` (default `0644`)
+- `user`: optional owner as `user`, `uid`, `user:group`, or `uid:gid`
+
+```json
+"files": [
+  {
+    "path": "/data/web/hello",
+    "chmod": "0644",
+    "user": "0:0",
+    "content": "Hello, world!\n",
+    "encoding": "plain"
+  }
+]
+```
 
 ### Interfaces
 

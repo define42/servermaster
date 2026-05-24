@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -77,6 +78,7 @@ var servermasterStatusCollector = collectServermasterStatus
 type Config struct {
 	PodmanMode    string               `json:"podman_mode"`
 	Folders       []FolderConfig       `json:"folders"`
+	Files         []FileConfig         `json:"files"`
 	Interfaces    []InterfaceConfig    `json:"interfaces"`
 	FirewallPorts []FirewallPortConfig `json:"firewall_ports"`
 	Containers    []ContainerConfig    `json:"containers"`
@@ -92,6 +94,14 @@ type FolderConfig struct {
 	Path  string `json:"path"`
 	Chmod string `json:"chmod"`
 	User  string `json:"user"`
+}
+
+type FileConfig struct {
+	Path     string `json:"path"`
+	Chmod    string `json:"chmod"`
+	User     string `json:"user"`
+	Content  string `json:"content"`
+	Encoding string `json:"encoding"`
 }
 
 type ContainerConfig struct {
@@ -948,6 +958,10 @@ func applyConfig(cfg *Config) error {
 		return err
 	}
 
+	if err := ensureFiles(cfg.Files); err != nil {
+		return err
+	}
+
 	if err := configureHostInterfaces(cfg.Interfaces); err != nil {
 		return err
 	}
@@ -1029,6 +1043,32 @@ func validateConfig(cfg *Config) error {
 			if _, _, err := parseOwner(folder.User); err != nil {
 				return fmt.Errorf("invalid user %q for folder %s: %w", folder.User, folderLabel, err)
 			}
+		}
+	}
+
+	for i, file := range cfg.Files {
+		fileLabel := file.Path
+		if fileLabel == "" {
+			fileLabel = fmt.Sprintf("#%d", i)
+		}
+
+		if file.Path == "" {
+			return fmt.Errorf("file %s is missing path", fileLabel)
+		}
+		if file.Chmod != "" {
+			if _, err := parseFileMode(file.Chmod); err != nil {
+				return fmt.Errorf("invalid chmod %q for file %s: %w", file.Chmod, fileLabel, err)
+			}
+		}
+		if file.User != "" {
+			if _, _, err := parseOwner(file.User); err != nil {
+				return fmt.Errorf("invalid user %q for file %s: %w", file.User, fileLabel, err)
+			}
+		}
+		// Decoding validates the encoding name and (for base64) the content
+		// without writing anything, so a bad file is rejected before any apply.
+		if _, err := decodeFileContent(file); err != nil {
+			return fmt.Errorf("invalid content for file %s: %w", fileLabel, err)
 		}
 	}
 
@@ -1189,6 +1229,86 @@ func ensureFolders(folders []FolderConfig) error {
 	}
 
 	return nil
+}
+
+// ensureFiles writes each declared file to its path, creating parent directories
+// as needed, then applies the requested owner and mode. Content is taken from
+// the config literally ("plain") or base64-decoded ("base64"). Like ensureFolders
+// it is idempotent: rewriting a file that already matches is harmless.
+func ensureFiles(files []FileConfig) error {
+	for i, file := range files {
+		fileLabel := file.Path
+		if fileLabel == "" {
+			fileLabel = fmt.Sprintf("#%d", i)
+		}
+
+		if file.Path == "" {
+			return fmt.Errorf("file %s is missing path", fileLabel)
+		}
+
+		content, err := decodeFileContent(file)
+		if err != nil {
+			return fmt.Errorf("decode content for file %s: %w", fileLabel, err)
+		}
+
+		mode := os.FileMode(0o644)
+		if file.Chmod != "" {
+			parsedMode, err := parseFileMode(file.Chmod)
+			if err != nil {
+				return fmt.Errorf("invalid chmod %q for file %s: %w", file.Chmod, fileLabel, err)
+			}
+			mode = parsedMode
+		}
+
+		uid, gid := -1, -1
+		if file.User != "" {
+			parsedUID, parsedGID, err := parseOwner(file.User)
+			if err != nil {
+				return fmt.Errorf("invalid user %q for file %s: %w", file.User, fileLabel, err)
+			}
+			uid, gid = parsedUID, parsedGID
+		}
+
+		if dir := filepath.Dir(file.Path); dir != "" {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				return fmt.Errorf("create parent dir for file %q failed: %w", file.Path, err)
+			}
+		}
+
+		// Write with the target mode, then Chmod to defeat the process umask so
+		// the file lands at exactly the requested permissions.
+		if err := os.WriteFile(file.Path, content, mode); err != nil {
+			return fmt.Errorf("write file %q failed: %w", file.Path, err)
+		}
+		if err := os.Chmod(file.Path, mode); err != nil {
+			return fmt.Errorf("set chmod for file %q failed: %w", file.Path, err)
+		}
+
+		if uid != -1 || gid != -1 {
+			if err := os.Chown(file.Path, uid, gid); err != nil {
+				return fmt.Errorf("set owner for file %q failed: %w", file.Path, err)
+			}
+		}
+	}
+
+	return nil
+}
+
+// decodeFileContent returns the bytes to write for a file, interpreting its
+// content according to the declared encoding. An empty encoding means "plain".
+func decodeFileContent(file FileConfig) ([]byte, error) {
+	switch strings.TrimSpace(file.Encoding) {
+	case "", "plain":
+		return []byte(file.Content), nil
+	case "base64":
+		decoded, err := base64.StdEncoding.DecodeString(file.Content)
+		if err != nil {
+			return nil, fmt.Errorf("invalid base64 content: %w", err)
+		}
+		return decoded, nil
+	default:
+		return nil, fmt.Errorf("unknown encoding %q (want \"plain\" or \"base64\")", file.Encoding)
+	}
 }
 
 func parseFileMode(chmod string) (os.FileMode, error) {

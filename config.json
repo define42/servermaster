@@ -7,6 +7,15 @@
       "user": "0:0"
     }
   ],
+  "files": [
+    {
+      "path": "/data/web/index.html",
+      "chmod": "0644",
+      "user": "0:0",
+      "content": "<h1>Hello, world!</h1>\n",
+      "encoding": "plain"
+    }
+  ],
   "interfaces": [
     {
       "name": "eth0",

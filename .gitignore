@@ -1,3 +1,6 @@
 # Build artifacts
 /dist/
 /servermaster
+
+# Coverage profile from `make test`
+/coverage.out

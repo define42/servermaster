@@ -14,7 +14,8 @@ GOARCH   ?= $(shell go env GOARCH)
 RPM_ARCH := $(if $(filter arm64,$(GOARCH)),aarch64,$(if $(filter amd64,$(GOARCH)),x86_64,$(GOARCH)))
 
 test:
-	go test ./... -coverpkg=./... -cover
+	go test ./... -coverpkg=./... -coverprofile=coverage.out
+	@go tool cover -func=coverage.out | tail -1
 
 lint:
 	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run
@@ -42,4 +43,4 @@ rpm: build
 		-out "$(DIST)/$(BINARY)-$(VERSION)-1.$(RPM_ARCH).rpm"
 
 clean:
-	rm -rf $(DIST)
+	rm -rf $(DIST) coverage.out

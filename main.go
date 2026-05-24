@@ -42,7 +42,6 @@ const (
 	webServerAddress        = ":8080"
 	defaultOstreeUploadPath = "/data/ostree/update.tar"
 	podmanRootfulMode       = "rootful"
-	podmanSocketPath        = "/run/podman/podman.sock"
 	servermasterLogTail     = 100
 	statusCommandTimeout    = 5 * time.Second
 
@@ -59,11 +58,6 @@ const (
 	// a small JSON document; the limit stops an unauthenticated caller from
 	// streaming an arbitrarily large body into memory.
 	maxConfigUploadBytes = 1 << 20 // 1 MiB
-
-	// nmstateStatePath is where the generated nmstate desired-state document is
-	// written before it is applied. The .yml extension (JSON is valid YAML) lets
-	// nmstate.service reapply it at boot in addition to the apply call below.
-	nmstateStatePath = "/etc/nmstate/servermaster.yml"
 
 	firewalldBusName       = "org.fedoraproject.FirewallD1"
 	firewalldObjectPath    = "/org/fedoraproject/FirewallD1"
@@ -101,6 +95,20 @@ var servermasterStatusCollector = collectServermasterStatus
 //
 //nolint:gochecknoglobals // process-wide log ring teed from the standard logger.
 var serviceLog = newLogRing(servermasterLogTail)
+
+// podmanSocketPath is the libpod API socket the tool talks to. It is a variable
+// rather than a constant so tests can point the client at a fake socket.
+//
+//nolint:gochecknoglobals // injectable seam so the Podman client can be tested against a fake socket.
+var podmanSocketPath = "/run/podman/podman.sock"
+
+// nmstateStatePath is where the generated nmstate desired-state document is
+// written before it is applied. The .yml extension (JSON is valid YAML) lets
+// nmstate.service reapply it at boot in addition to the apply call below. It is
+// a variable so tests can redirect it away from the real /etc/nmstate.
+//
+//nolint:gochecknoglobals // injectable seam so interface apply can be tested without touching /etc/nmstate.
+var nmstateStatePath = "/etc/nmstate/servermaster.yml"
 
 // logRing is a bounded, concurrency-safe buffer of the most recent log lines. It
 // is an io.Writer, so installing it as (part of) the standard logger's output

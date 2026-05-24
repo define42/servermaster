@@ -27,6 +27,7 @@ import (
 	"github.com/containers/podman/v5/pkg/bindings"
 	systemd "github.com/coreos/go-systemd/v22/dbus"
 	dbus "github.com/godbus/dbus/v5"
+	"github.com/vishvananda/netlink"
 )
 
 const (
@@ -186,8 +187,45 @@ type servermasterStatus struct {
 	GeneratedAt   string                   `json:"generated_at"`
 	Ostree        ostreeStatus             `json:"ostree"`
 	FreeDiskSpace []diskStatus             `json:"free_diskspace"`
+	Network       networkStatus            `json:"network"`
 	Containers    []runningContainerStatus `json:"containers"`
 	Errors        []string                 `json:"errors,omitempty"`
+}
+
+// networkStatus is the live network configuration of every host interface, read
+// from the kernel via netlink rather than from config.json: it reports actual
+// node state (including interfaces this tool does not manage), not the desired
+// state. DNS is not a netlink concept, so it is read from /etc/resolv.conf.
+type networkStatus struct {
+	Source     string             `json:"source,omitempty"`
+	Interfaces []networkInterface `json:"interfaces"`
+	Routes     []networkRoute     `json:"routes,omitempty"`
+	DNS        []string           `json:"dns,omitempty"`
+	Error      string             `json:"error,omitempty"`
+}
+
+type networkInterface struct {
+	Name      string           `json:"name"`
+	Index     int              `json:"index"`
+	Type      string           `json:"type,omitempty"`
+	State     string           `json:"state,omitempty"`
+	MAC       string           `json:"mac_address,omitempty"`
+	MTU       int              `json:"mtu,omitempty"`
+	Flags     []string         `json:"flags,omitempty"`
+	Addresses []networkAddress `json:"addresses,omitempty"`
+}
+
+type networkAddress struct {
+	IP           string `json:"ip"`
+	PrefixLength int    `json:"prefix_length"`
+	Family       string `json:"family"`
+}
+
+type networkRoute struct {
+	Destination string `json:"destination,omitempty"`
+	Gateway     string `json:"gateway,omitempty"`
+	Interface   string `json:"interface,omitempty"`
+	Family      string `json:"family,omitempty"`
 }
 
 type ostreeStatus struct {
@@ -366,6 +404,12 @@ func collectServermasterStatus(ctx context.Context, configPath string) servermas
 	for _, err := range diskErrors {
 		status.Errors = append(status.Errors, fmt.Sprintf("disk: %v", err))
 	}
+
+	network := collectNetworkStatus(ctx)
+	if network.Error != "" {
+		status.Errors = append(status.Errors, fmt.Sprintf("network: %s", network.Error))
+	}
+	status.Network = network
 
 	containers, err := collectRunningContainerStatuses(ctx, servermasterLogTail)
 	if err != nil {
@@ -1899,6 +1943,171 @@ type nmDNS struct {
 
 type nmDNSConfig struct {
 	Server []string `json:"server,omitempty"`
+}
+
+// netlink access points are indirected through variables so tests can supply
+// fixtures without a live kernel/network namespace. resolvConfPath is the file
+// the resolver nameservers are read from.
+var (
+	netlinkLinkList  = netlink.LinkList
+	netlinkAddrList  = netlink.AddrList
+	netlinkRouteList = netlink.RouteList
+	resolvConfPath   = "/etc/resolv.conf"
+)
+
+// collectNetworkStatus reads the live network configuration of every host
+// interface from the kernel via netlink (links, addresses, and routes) plus the
+// resolver list from /etc/resolv.conf. Partial failures are recorded in the
+// returned status's Error field rather than aborting the wider collection; a
+// failure to list links at all is fatal to this section only.
+func collectNetworkStatus(ctx context.Context) networkStatus {
+	_ = ctx // netlink calls are synchronous syscalls and do not take a context.
+
+	links, err := netlinkLinkList()
+	if err != nil {
+		return networkStatus{Error: fmt.Sprintf("list links: %v", err)}
+	}
+
+	status := networkStatus{
+		Source:     "netlink",
+		Interfaces: make([]networkInterface, 0, len(links)),
+	}
+
+	nameByIndex := make(map[int]string, len(links))
+	for _, link := range links {
+		attrs := link.Attrs()
+		nameByIndex[attrs.Index] = attrs.Name
+
+		iface := networkInterface{
+			Name:  attrs.Name,
+			Index: attrs.Index,
+			Type:  link.Type(),
+			State: attrs.OperState.String(),
+			MTU:   attrs.MTU,
+			Flags: interfaceFlags(attrs.Flags),
+		}
+		if len(attrs.HardwareAddr) > 0 {
+			iface.MAC = attrs.HardwareAddr.String()
+		}
+
+		addrs, addrErr := interfaceAddresses(link)
+		if addrErr != nil {
+			status.Error = appendStatusError(status.Error, fmt.Sprintf("addresses for %s: %v", attrs.Name, addrErr))
+		}
+		iface.Addresses = addrs
+
+		status.Interfaces = append(status.Interfaces, iface)
+	}
+
+	routes, err := netlinkRouteList(nil, netlink.FAMILY_ALL)
+	if err != nil {
+		status.Error = appendStatusError(status.Error, fmt.Sprintf("list routes: %v", err))
+	} else {
+		for _, route := range routes {
+			status.Routes = append(status.Routes, convertRoute(route, nameByIndex))
+		}
+	}
+
+	status.DNS = resolvConfNameservers(resolvConfPath)
+
+	return status
+}
+
+func interfaceAddresses(link netlink.Link) ([]networkAddress, error) {
+	addrs, err := netlinkAddrList(link, netlink.FAMILY_ALL)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]networkAddress, 0, len(addrs))
+	for _, addr := range addrs {
+		if addr.IPNet == nil {
+			continue
+		}
+		prefix, _ := addr.Mask.Size()
+		result = append(result, networkAddress{
+			IP:           addr.IP.String(),
+			PrefixLength: prefix,
+			Family:       ipFamily(addr.IP),
+		})
+	}
+	return result, nil
+}
+
+func convertRoute(route netlink.Route, nameByIndex map[int]string) networkRoute {
+	converted := networkRoute{
+		Interface: nameByIndex[route.LinkIndex],
+		Family:    routeFamily(route),
+	}
+
+	switch {
+	case route.Dst != nil:
+		converted.Destination = route.Dst.String()
+	case converted.Family == "ipv6":
+		converted.Destination = "::/0"
+	default:
+		converted.Destination = "0.0.0.0/0"
+	}
+
+	if len(route.Gw) > 0 {
+		converted.Gateway = route.Gw.String()
+	}
+
+	return converted
+}
+
+func interfaceFlags(flags net.Flags) []string {
+	if flags == 0 {
+		return nil
+	}
+	return strings.Split(flags.String(), "|")
+}
+
+func ipFamily(ip net.IP) string {
+	if ip.To4() != nil {
+		return "ipv4"
+	}
+	return "ipv6"
+}
+
+func routeFamily(route netlink.Route) string {
+	switch route.Family {
+	case netlink.FAMILY_V4:
+		return "ipv4"
+	case netlink.FAMILY_V6:
+		return "ipv6"
+	}
+	// Family is not always populated; infer it from the route's addresses.
+	if route.Dst != nil {
+		return ipFamily(route.Dst.IP)
+	}
+	if len(route.Gw) > 0 {
+		return ipFamily(route.Gw)
+	}
+	return "ipv4"
+}
+
+// resolvConfNameservers returns the nameserver addresses declared in a
+// resolv.conf-formatted file. A missing or unreadable file yields no servers
+// (DNS is best-effort context, not a hard error for the status endpoint).
+func resolvConfNameservers(path string) []string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+
+	var servers []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "nameserver" {
+			servers = append(servers, fields[1])
+		}
+	}
+	return servers
 }
 
 func configureHostInterfaces(interfaces []InterfaceConfig) error {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +12,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/vishvananda/netlink"
 )
 
 func TestValidateContainerPort(t *testing.T) {
@@ -331,6 +334,160 @@ func TestBuildNMState(t *testing.T) {
 	}
 }
 
+// device builds a fake netlink link for tests. netlink.Device.Type() reports
+// "device", matching what LinkList returns for a physical interface.
+func device(index int, name, mac string, mtu int, state netlink.LinkOperState, flags net.Flags) *netlink.Device {
+	attrs := netlink.LinkAttrs{
+		Index:     index,
+		Name:      name,
+		MTU:       mtu,
+		OperState: state,
+		Flags:     flags,
+	}
+	if mac != "" {
+		hw, err := net.ParseMAC(mac)
+		if err != nil {
+			panic(err)
+		}
+		attrs.HardwareAddr = hw
+	}
+	return &netlink.Device{LinkAttrs: attrs}
+}
+
+func cidr(s string) *net.IPNet {
+	ip, ipNet, err := net.ParseCIDR(s)
+	if err != nil {
+		panic(err)
+	}
+	ipNet.IP = ip
+	return ipNet
+}
+
+func stubNetlink(links []netlink.Link, addrs map[int][]netlink.Addr, routes []netlink.Route, routesErr error) func() {
+	prevLink, prevAddr, prevRoute := netlinkLinkList, netlinkAddrList, netlinkRouteList
+
+	netlinkLinkList = func() ([]netlink.Link, error) { return links, nil }
+	netlinkAddrList = func(link netlink.Link, _ int) ([]netlink.Addr, error) {
+		return addrs[link.Attrs().Index], nil
+	}
+	netlinkRouteList = func(netlink.Link, int) ([]netlink.Route, error) { return routes, routesErr }
+
+	return func() {
+		netlinkLinkList, netlinkAddrList, netlinkRouteList = prevLink, prevAddr, prevRoute
+	}
+}
+
+func TestCollectNetworkStatus(t *testing.T) {
+	resolv := filepath.Join(t.TempDir(), "resolv.conf")
+	if err := os.WriteFile(resolv, []byte("# comment\nnameserver 1.1.1.1\nnameserver 8.8.8.8\nsearch example.com\n"), 0o644); err != nil {
+		t.Fatalf("write resolv.conf: %v", err)
+	}
+	prevResolv := resolvConfPath
+	resolvConfPath = resolv
+	defer func() { resolvConfPath = prevResolv }()
+
+	links := []netlink.Link{
+		device(2, "eth0", "52:54:00:12:34:56", 1500, netlink.OperUp, net.FlagUp|net.FlagBroadcast),
+		device(1, "lo", "", 65536, netlink.OperUnknown, net.FlagUp|net.FlagLoopback),
+	}
+	addrs := map[int][]netlink.Addr{
+		2: {
+			{IPNet: cidr("192.168.1.10/24")},
+			{IPNet: cidr("fe80::1/64")},
+		},
+	}
+	routes := []netlink.Route{
+		{LinkIndex: 2, Gw: net.ParseIP("192.168.1.1"), Family: netlink.FAMILY_V4},
+		{LinkIndex: 2, Dst: cidr("192.168.1.0/24"), Family: netlink.FAMILY_V4},
+	}
+	defer stubNetlink(links, addrs, routes, nil)()
+
+	status := collectNetworkStatus(context.Background())
+
+	if status.Error != "" {
+		t.Fatalf("unexpected error: %s", status.Error)
+	}
+	if status.Source != "netlink" {
+		t.Fatalf("source = %q, want netlink", status.Source)
+	}
+	if len(status.Interfaces) != 2 {
+		t.Fatalf("interfaces = %d, want 2", len(status.Interfaces))
+	}
+
+	eth0 := status.Interfaces[0]
+	if eth0.Name != "eth0" || eth0.Index != 2 || eth0.Type != "device" || eth0.State != "up" {
+		t.Fatalf("eth0 metadata mismatch: %+v", eth0)
+	}
+	if eth0.MAC != "52:54:00:12:34:56" || eth0.MTU != 1500 {
+		t.Fatalf("eth0 mac/mtu mismatch: %+v", eth0)
+	}
+	if len(eth0.Addresses) != 2 {
+		t.Fatalf("eth0 addresses = %d, want 2", len(eth0.Addresses))
+	}
+	if eth0.Addresses[0] != (networkAddress{IP: "192.168.1.10", PrefixLength: 24, Family: "ipv4"}) {
+		t.Fatalf("eth0 ipv4 address mismatch: %+v", eth0.Addresses[0])
+	}
+	if eth0.Addresses[1].Family != "ipv6" || eth0.Addresses[1].PrefixLength != 64 {
+		t.Fatalf("eth0 ipv6 address mismatch: %+v", eth0.Addresses[1])
+	}
+
+	lo := status.Interfaces[1]
+	if lo.Name != "lo" || len(lo.Addresses) != 0 || lo.MAC != "" {
+		t.Fatalf("lo should have no addresses or mac: %+v", lo)
+	}
+
+	if len(status.Routes) != 2 {
+		t.Fatalf("routes = %d, want 2", len(status.Routes))
+	}
+	if status.Routes[0] != (networkRoute{Destination: "0.0.0.0/0", Gateway: "192.168.1.1", Interface: "eth0", Family: "ipv4"}) {
+		t.Fatalf("default route mismatch: %+v", status.Routes[0])
+	}
+	if status.Routes[1].Destination != "192.168.1.0/24" || status.Routes[1].Interface != "eth0" {
+		t.Fatalf("subnet route mismatch: %+v", status.Routes[1])
+	}
+
+	if !reflect.DeepEqual(status.DNS, []string{"1.1.1.1", "8.8.8.8"}) {
+		t.Fatalf("dns = %v, want [1.1.1.1 8.8.8.8]", status.DNS)
+	}
+
+	t.Run("link listing failure is reported", func(t *testing.T) {
+		prev := netlinkLinkList
+		netlinkLinkList = func() ([]netlink.Link, error) { return nil, fmt.Errorf("boom") }
+		defer func() { netlinkLinkList = prev }()
+
+		status := collectNetworkStatus(context.Background())
+		if status.Error == "" || !strings.Contains(status.Error, "boom") {
+			t.Fatalf("expected link listing error, got %+v", status)
+		}
+	})
+
+	t.Run("route listing failure is recorded but interfaces still returned", func(t *testing.T) {
+		defer stubNetlink(links, addrs, nil, fmt.Errorf("route boom"))()
+
+		status := collectNetworkStatus(context.Background())
+		if len(status.Interfaces) != 2 {
+			t.Fatalf("interfaces = %d, want 2 despite route error", len(status.Interfaces))
+		}
+		if !strings.Contains(status.Error, "route boom") {
+			t.Fatalf("expected route error recorded, got %q", status.Error)
+		}
+	})
+}
+
+func TestResolvConfNameservers(t *testing.T) {
+	if servers := resolvConfNameservers(filepath.Join(t.TempDir(), "missing")); servers != nil {
+		t.Fatalf("missing file should yield no servers, got %v", servers)
+	}
+
+	path := filepath.Join(t.TempDir(), "resolv.conf")
+	if err := os.WriteFile(path, []byte("nameserver 9.9.9.9\n; comment\noptions edns0\nnameserver 2606:4700:4700::1111\n"), 0o644); err != nil {
+		t.Fatalf("write resolv.conf: %v", err)
+	}
+	if got := resolvConfNameservers(path); !reflect.DeepEqual(got, []string{"9.9.9.9", "2606:4700:4700::1111"}) {
+		t.Fatalf("nameservers = %v", got)
+	}
+}
+
 func TestContainerNeedsStop(t *testing.T) {
 	tests := []struct {
 		state string
@@ -598,6 +755,17 @@ func TestHandleServermasterStatus(t *testing.T) {
 					UsedBytes:      60,
 					UsedPercent:    60,
 				}},
+				Network: networkStatus{
+					Source: "netlink",
+					Interfaces: []networkInterface{{
+						Name:      "eth0",
+						Index:     2,
+						Type:      "device",
+						State:     "up",
+						Addresses: []networkAddress{{IP: "192.168.1.10", PrefixLength: 24, Family: "ipv4"}},
+					}},
+					DNS: []string{"1.1.1.1"},
+				},
 				Containers: []runningContainerStatus{{
 					ID:      "abc123",
 					Name:    "web",
@@ -628,6 +796,9 @@ func TestHandleServermasterStatus(t *testing.T) {
 		}
 		if got.Status != "ok" || got.Ostree.Version != "1.2.3" || len(got.Containers) != 1 {
 			t.Fatalf("unexpected status document: %+v", got)
+		}
+		if len(got.Network.Interfaces) != 1 || got.Network.Interfaces[0].Name != "eth0" {
+			t.Fatalf("unexpected network document: %+v", got.Network)
 		}
 		if got.Containers[0].Logs[0] != "stdout: ready" {
 			t.Fatalf("logs = %v, want stdout line", got.Containers[0].Logs)

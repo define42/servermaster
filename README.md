@@ -100,6 +100,9 @@ management network.
 
 - ostree/bootc deployment information
 - free disk space
+- live network configuration for every host interface (read from the kernel via
+  netlink: addresses, routes, and link state for all interfaces, not just managed
+  ones, plus resolver nameservers from `/etc/resolv.conf`)
 - running Podman containers
 - image and version metadata where available
 - the last 100 log lines from each running container

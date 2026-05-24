@@ -4,6 +4,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -60,6 +61,57 @@ func TestConvertRouteIPv6Default(t *testing.T) {
 	// IPv4 family with no Dst yields the IPv4 default route.
 	if got := convertRoute(netlink.Route{Family: netlink.FAMILY_V4}, nil); got.Destination != "0.0.0.0/0" {
 		t.Fatalf("route dest = %q, want 0.0.0.0/0", got.Destination)
+	}
+}
+
+func TestInterfaceSpeed(t *testing.T) {
+	prev := sysClassNetPath
+	defer func() { sysClassNetPath = prev }()
+	root := t.TempDir()
+	sysClassNetPath = root
+
+	writeSpeedFile(t, root, "eth0", "1000\n")
+	writeSpeedFile(t, root, "dummy0", "-1\n") // interfaces without a speed report -1
+
+	if got := interfaceSpeed("eth0"); got != 1000 {
+		t.Fatalf("interfaceSpeed(eth0) = %d, want 1000", got)
+	}
+	if got := interfaceSpeed("dummy0"); got != 0 {
+		t.Fatalf("interfaceSpeed(dummy0) = %d, want 0 (negative normalized)", got)
+	}
+	if got := interfaceSpeed("eth1"); got != 0 {
+		t.Fatalf("interfaceSpeed(eth1) = %d, want 0 (no speed file)", got)
+	}
+}
+
+func writeSpeedFile(t *testing.T, root, name, content string) {
+	t.Helper()
+	dir := filepath.Join(root, name)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "speed"), []byte(content), 0o600); err != nil {
+		t.Fatalf("write speed: %v", err)
+	}
+}
+
+func TestInterfaceStatistics(t *testing.T) {
+	if interfaceStatistics(nil) != nil {
+		t.Fatal("nil kernel statistics must map to nil")
+	}
+
+	got := interfaceStatistics(&netlink.LinkStatistics{
+		RxPackets: 56436, RxBytes: 188213261, RxErrors: 1, RxDropped: 2, RxFifoErrors: 3, RxFrameErrors: 4,
+		TxPackets: 38747, TxBytes: 8678923, TxErrors: 5, TxDropped: 6, TxFifoErrors: 7, TxCarrierErrors: 8,
+		Collisions: 9,
+	})
+	want := &interfaceStats{
+		RXPackets: 56436, RXBytes: 188213261, RXErrors: 1, RXDropped: 2, RXOverruns: 3, RXFrame: 4,
+		TXPackets: 38747, TXBytes: 8678923, TXErrors: 5, TXDropped: 6, TXOverruns: 7, TXCarrier: 8,
+		Collisions: 9,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("statistics = %+v, want %+v", got, want)
 	}
 }
 

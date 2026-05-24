@@ -586,6 +586,7 @@ func device(index int, name, mac string, mtu int, state netlink.LinkOperState, f
 		Index:     index,
 		Name:      name,
 		MTU:       mtu,
+		TxQLen:    1000,
 		OperState: state,
 		Flags:     flags,
 	}
@@ -647,6 +648,12 @@ func TestCollectNetworkStatus(t *testing.T) {
 	resolvConfPath = resolv
 	defer func() { resolvConfPath = prevResolv }()
 
+	// Point sysfs at an empty tree so interface speeds are read as unavailable
+	// rather than picking up the test host's real NICs.
+	prevSysNet := sysClassNetPath
+	sysClassNetPath = t.TempDir()
+	defer func() { sysClassNetPath = prevSysNet }()
+
 	links, addrs := testNetworkLinks()
 	routes := []netlink.Route{
 		{LinkIndex: 2, Gw: net.ParseIP("192.168.1.1"), Family: netlink.FAMILY_V4},
@@ -674,13 +681,21 @@ func assertNetworkInterfaces(t *testing.T, interfaces []networkInterface) {
 	if len(interfaces) != 2 {
 		t.Fatalf("interfaces = %d, want 2", len(interfaces))
 	}
+	assertEth0(t, interfaces[0])
 
-	eth0 := interfaces[0]
+	lo := interfaces[1]
+	if lo.Name != "lo" || len(lo.Addresses) != 0 || lo.MAC != "" {
+		t.Fatalf("lo should have no addresses or mac: %+v", lo)
+	}
+}
+
+func assertEth0(t *testing.T, eth0 networkInterface) {
+	t.Helper()
 	if eth0.Name != "eth0" || eth0.Index != 2 || eth0.Type != "device" || eth0.State != "up" {
 		t.Fatalf("eth0 metadata mismatch: %+v", eth0)
 	}
-	if eth0.MAC != "52:54:00:12:34:56" || eth0.MTU != 1500 {
-		t.Fatalf("eth0 mac/mtu mismatch: %+v", eth0)
+	if eth0.MAC != "52:54:00:12:34:56" || eth0.MTU != 1500 || eth0.TxQueueLen != 1000 {
+		t.Fatalf("eth0 mac/mtu/txqueuelen mismatch: %+v", eth0)
 	}
 	if len(eth0.Addresses) != 2 {
 		t.Fatalf("eth0 addresses = %d, want 2", len(eth0.Addresses))
@@ -690,11 +705,6 @@ func assertNetworkInterfaces(t *testing.T, interfaces []networkInterface) {
 	}
 	if eth0.Addresses[1].Family != "ipv6" || eth0.Addresses[1].PrefixLength != 64 {
 		t.Fatalf("eth0 ipv6 address mismatch: %+v", eth0.Addresses[1])
-	}
-
-	lo := interfaces[1]
-	if lo.Name != "lo" || len(lo.Addresses) != 0 || lo.MAC != "" {
-		t.Fatalf("lo should have no addresses or mac: %+v", lo)
 	}
 }
 

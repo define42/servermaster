@@ -126,6 +126,12 @@ var (
 	procStatPath    = "/proc/stat"
 )
 
+// sysClassNetPath is the sysfs network-device tree, used to read per-interface
+// link speed. It is a variable so tests can supply a fixture tree.
+//
+//nolint:gochecknoglobals // injectable seam so interface speed can be tested with a fixture sysfs tree.
+var sysClassNetPath = "/sys/class/net"
+
 // logRing is a bounded, concurrency-safe buffer of the most recent log lines. It
 // is an io.Writer, so installing it as (part of) the standard logger's output
 // captures every log.Print* call. The standard logger writes one full record per
@@ -348,20 +354,42 @@ type networkStatus struct {
 }
 
 type networkInterface struct {
-	Name      string           `json:"name"`
-	Index     int              `json:"index"`
-	Type      string           `json:"type,omitempty"`
-	State     string           `json:"state,omitempty"`
-	MAC       string           `json:"mac_address,omitempty"`
-	MTU       int              `json:"mtu,omitempty"`
-	Flags     []string         `json:"flags,omitempty"`
-	Addresses []networkAddress `json:"addresses,omitempty"`
+	Name       string           `json:"name"`
+	Index      int              `json:"index"`
+	Type       string           `json:"type,omitempty"`
+	State      string           `json:"state,omitempty"`
+	MAC        string           `json:"mac_address,omitempty"`
+	MTU        int              `json:"mtu,omitempty"`
+	SpeedMbps  int              `json:"speed_mbps,omitempty"`
+	TxQueueLen int              `json:"txqueuelen"`
+	Flags      []string         `json:"flags,omitempty"`
+	Addresses  []networkAddress `json:"addresses,omitempty"`
+	Statistics *interfaceStats  `json:"statistics,omitempty"`
 }
 
 type networkAddress struct {
 	IP           string `json:"ip"`
 	PrefixLength int    `json:"prefix_length"`
 	Family       string `json:"family"`
+}
+
+// interfaceStats are the kernel's cumulative per-interface counters — the same
+// figures `ifconfig`/`ip -s link` report. overruns are FIFO errors, frame is RX
+// frame errors, and carrier is TX carrier errors.
+type interfaceStats struct {
+	RXPackets  uint64 `json:"rx_packets"`
+	RXBytes    uint64 `json:"rx_bytes"`
+	RXErrors   uint64 `json:"rx_errors"`
+	RXDropped  uint64 `json:"rx_dropped"`
+	RXOverruns uint64 `json:"rx_overruns"`
+	RXFrame    uint64 `json:"rx_frame"`
+	TXPackets  uint64 `json:"tx_packets"`
+	TXBytes    uint64 `json:"tx_bytes"`
+	TXErrors   uint64 `json:"tx_errors"`
+	TXDropped  uint64 `json:"tx_dropped"`
+	TXOverruns uint64 `json:"tx_overruns"`
+	TXCarrier  uint64 `json:"tx_carrier"`
+	Collisions uint64 `json:"collisions"`
 }
 
 type networkRoute struct {
@@ -2887,12 +2915,15 @@ func collectNetworkStatus(ctx context.Context) networkStatus {
 		nameByIndex[attrs.Index] = attrs.Name
 
 		iface := networkInterface{
-			Name:  attrs.Name,
-			Index: attrs.Index,
-			Type:  link.Type(),
-			State: attrs.OperState.String(),
-			MTU:   attrs.MTU,
-			Flags: interfaceFlags(attrs.Flags),
+			Name:       attrs.Name,
+			Index:      attrs.Index,
+			Type:       link.Type(),
+			State:      attrs.OperState.String(),
+			MTU:        attrs.MTU,
+			SpeedMbps:  interfaceSpeed(attrs.Name),
+			TxQueueLen: attrs.TxQLen,
+			Flags:      interfaceFlags(attrs.Flags),
+			Statistics: interfaceStatistics(attrs.Statistics),
 		}
 		if len(attrs.HardwareAddr) > 0 {
 			iface.MAC = attrs.HardwareAddr.String()
@@ -2940,6 +2971,47 @@ func interfaceAddresses(link netlink.Link) ([]networkAddress, error) {
 		})
 	}
 	return result, nil
+}
+
+// interfaceSpeed returns an interface's link speed in Mbit/s, read from sysfs.
+// Interfaces without a meaningful speed — loopback, dummy, or a down link —
+// report an error or a negative value there, which is normalized to 0 (and so
+// omitted from the JSON).
+func interfaceSpeed(name string) int {
+	data, err := os.ReadFile(filepath.Join(sysClassNetPath, name, "speed")) //nolint:gosec // name comes from the kernel link list, not request input.
+	if err != nil {
+		return 0
+	}
+	speed, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || speed < 0 {
+		return 0
+	}
+	return speed
+}
+
+// interfaceStatistics maps the kernel's per-interface counters into the reported
+// statistics, following ifconfig's naming (overruns are FIFO errors, frame is RX
+// frame errors, carrier is TX carrier errors). It returns nil when the kernel
+// provided no statistics for the link.
+func interfaceStatistics(stats *netlink.LinkStatistics) *interfaceStats {
+	if stats == nil {
+		return nil
+	}
+	return &interfaceStats{
+		RXPackets:  stats.RxPackets,
+		RXBytes:    stats.RxBytes,
+		RXErrors:   stats.RxErrors,
+		RXDropped:  stats.RxDropped,
+		RXOverruns: stats.RxFifoErrors,
+		RXFrame:    stats.RxFrameErrors,
+		TXPackets:  stats.TxPackets,
+		TXBytes:    stats.TxBytes,
+		TXErrors:   stats.TxErrors,
+		TXDropped:  stats.TxDropped,
+		TXOverruns: stats.TxFifoErrors,
+		TXCarrier:  stats.TxCarrierErrors,
+		Collisions: stats.Collisions,
+	}
 }
 
 func convertRoute(route netlink.Route, nameByIndex map[int]string) networkRoute {

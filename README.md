@@ -112,7 +112,9 @@ management network.
 - `cpu`: core count and current utilization percent (sampled briefly from
   `/proc/stat`)
 - live network configuration for every host interface (read from the kernel via
-  netlink: addresses, routes, and link state for all interfaces, not just managed
+  netlink: addresses, routes, link state, link speed (Mbit/s, from sysfs),
+  transmit queue length, and RX/TX counters — packets, bytes, errors, dropped,
+  overruns, frame, carrier, and collisions — for all interfaces, not just managed
   ones, plus resolver nameservers from `/etc/resolv.conf`)
 - running Podman containers
 - image and version metadata where available

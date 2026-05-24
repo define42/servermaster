@@ -1263,11 +1263,12 @@ func parseGroup(value string) (int, error) {
 }
 
 // configureFirewallPorts enforces config.json as the single source of truth for
-// open firewall ports: it opens (and persists) every declared port, then closes
-// any port currently open in firewalld that is not declared. Because the config
-// owns the entire port set, an empty list is not a no-op — it still runs the
-// cleanup so no undeclared port is left open. firewalld *services* (for example
-// ssh, cockpit) are not ports and are intentionally left untouched.
+// firewalld: it opens (and persists) every declared port, then closes any port
+// not declared and removes every firewalld service. Because the config owns the
+// entire firewall surface, an empty list is not a no-op — it still runs the
+// cleanup so no undeclared port and no service is left open. Access is expressed
+// only as ports, so service-provided access (notably the default ssh service)
+// survives only if the corresponding port (for example 22/tcp) is declared.
 func configureFirewallPorts(ports []FirewallPortConfig) error {
 	// firewalld owns its D-Bus name only while running and is not D-Bus
 	// activatable on a default install, so bring it up before talking to it.
@@ -1323,7 +1324,7 @@ func configureFirewallPorts(ports []FirewallPortConfig) error {
 	}
 
 	declared := declaredFirewallPorts(ports, defaultZone)
-	if err := removeUnmanagedFirewallPorts(conn, firewalld, config, declared); err != nil {
+	if err := removeUnmanagedFirewallRules(conn, firewalld, config, declared); err != nil {
 		return err
 	}
 
@@ -1366,12 +1367,15 @@ func declaredFirewallPorts(ports []FirewallPortConfig, defaultZone string) map[s
 	return declared
 }
 
-// removeUnmanagedFirewallPorts closes every open port not present in declared,
-// in both the runtime and permanent firewalld configuration and across every
-// zone, so a port opened out of band cannot survive a reconcile. declared maps a
-// zone name to the set of "port/proto" keys allowed in that zone.
-func removeUnmanagedFirewallPorts(conn *dbus.Conn, firewalld, config dbus.BusObject, declared map[string]map[string]struct{}) error {
-	// Runtime config: closing takes effect immediately.
+// removeUnmanagedFirewallRules enforces config.json as the single source of
+// truth for firewalld: across every zone, in both the runtime and permanent
+// configuration, it closes every open port not present in declared and removes
+// every service. Services are stripped wholesale because config.json expresses
+// access only as ports — so any service-provided access (notably the default
+// `ssh` service) survives a reconcile only if re-declared as a port. declared
+// maps a zone name to the set of "port/proto" keys allowed in that zone.
+func removeUnmanagedFirewallRules(conn *dbus.Conn, firewalld, config dbus.BusObject, declared map[string]map[string]struct{}) error {
+	// Runtime config: changes take effect immediately.
 	var runtimeZones []string
 	if err := firewalld.Call(firewalldZoneInterface+".getZones", 0).Store(&runtimeZones); err != nil {
 		return fmt.Errorf("list runtime firewall zones failed: %w", err)
@@ -1395,9 +1399,21 @@ func removeUnmanagedFirewallPorts(conn *dbus.Conn, firewalld, config dbus.BusObj
 			}
 			log.Printf("closed unmanaged firewall port %s/%s in zone %s", port, protocol, zone)
 		}
+
+		var services []string
+		if err := firewalld.Call(firewalldZoneInterface+".getServices", 0, zone).Store(&services); err != nil {
+			return fmt.Errorf("list runtime services for zone %q failed: %w", zone, err)
+		}
+		for _, service := range services {
+			var appliedZone string
+			if err := firewalld.Call(firewalldZoneInterface+".removeService", 0, zone, service).Store(&appliedZone); err != nil {
+				return fmt.Errorf("remove firewall service %q in zone %q failed: %w", service, zone, err)
+			}
+			log.Printf("removed firewall service %s in zone %s", service, zone)
+		}
 	}
 
-	// Permanent config: closing survives a firewalld reload and a reboot.
+	// Permanent config: changes survive a firewalld reload and a reboot.
 	var permanentZones []string
 	if err := config.Call(firewalldConfigInterface+".getZoneNames", 0).Store(&permanentZones); err != nil {
 		return fmt.Errorf("list permanent firewall zones failed: %w", err)
@@ -1421,6 +1437,17 @@ func removeUnmanagedFirewallPorts(conn *dbus.Conn, firewalld, config dbus.BusObj
 				return fmt.Errorf("remove permanent firewall port %s/%s in zone %q failed: %w", pp.Port, pp.Protocol, zone, err)
 			}
 			log.Printf("removed unmanaged permanent firewall port %s/%s in zone %s", pp.Port, pp.Protocol, zone)
+		}
+
+		var services []string
+		if err := zoneObject.Call(firewalldConfigZoneInterface+".getServices", 0).Store(&services); err != nil {
+			return fmt.Errorf("list permanent services for zone %q failed: %w", zone, err)
+		}
+		for _, service := range services {
+			if err := zoneObject.Call(firewalldConfigZoneInterface+".removeService", 0, service).Err; err != nil {
+				return fmt.Errorf("remove permanent firewall service %q in zone %q failed: %w", service, zone, err)
+			}
+			log.Printf("removed permanent firewall service %s in zone %s", service, zone)
 		}
 	}
 

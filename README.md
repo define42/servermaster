@@ -19,7 +19,8 @@ On startup, and after a successful remote config upload, `servermaster`:
 3. Creates declared host folders with the requested mode and owner.
 4. Applies declared host interface settings through `nmstatectl`.
 5. Starts `firewalld.service`, opens declared firewalld ports in runtime and
-   permanent configuration, and closes any open port not declared in the config.
+   permanent configuration, then closes any undeclared port and removes every
+   firewalld service (ports become the only way anything is open).
 6. Starts the rootful `podman.socket` through systemd.
 7. Waits for the Podman Unix socket to become reachable.
 8. Stops running containers that are not declared in the config.
@@ -187,12 +188,18 @@ reload and reboot persistence. An empty `zone` uses firewalld's default zone.
 activatable on a default install), so a stopped firewalld is brought up
 automatically rather than failing the apply.
 
-`firewall_ports` is the single source of truth for open ports: on every reconcile
-`servermaster` closes any port open in firewalld — in any zone, in both runtime
-and permanent config — that is not declared here, just as it stops undeclared
-containers. An empty (or omitted) `firewall_ports` therefore closes all open
-ports. firewalld *services* (for example `ssh`, `cockpit`) are not ports and are
-left untouched, so SSH access configured as a service is not affected.
+`firewall_ports` is the single source of truth for the entire firewall surface:
+on every reconcile `servermaster` closes any port open in firewalld — in any
+zone, in both runtime and permanent config — that is not declared here, and
+**removes every firewalld service** (for example `ssh`, `cockpit`, `dhcpv6-client`),
+just as it stops undeclared containers. Access is expressed only as ports, so an
+empty (or omitted) `firewall_ports` closes everything.
+
+> **Warning — SSH lockout.** The default zone allows SSH through the `ssh`
+> *service*, not a port. Because services are stripped, SSH survives a reconcile
+> only if you declare its port explicitly, for example
+> `{ "zone": "public", "port": "22", "protocol": "tcp" }`. A config that omits
+> `22/tcp` will lock you out of remote access on the next reconcile.
 
 firewalld is an optional (`Recommends`) dependency. If it cannot be started and
 no ports are declared, the firewall step is skipped (nothing to enforce); if

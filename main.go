@@ -1719,7 +1719,8 @@ func configHash(c ContainerConfig) string {
 // reconcileContainer converges a single declared container to its desired state.
 // A container that is already running with a matching config hash is left as-is,
 // so an unchanged container is never restarted, re-pulled, or recreated. Any
-// other case (missing, stopped, or config changed) is (re)created from the spec.
+// other case (missing, stopped, or config changed) is (re)created from the spec,
+// pulling the image only when it is not already present in local storage.
 func reconcileContainer(ctx context.Context, c ContainerConfig) error {
 	spec, err := createSpec(c)
 	if err != nil {
@@ -1748,8 +1749,14 @@ func reconcileContainer(ctx context.Context, c ContainerConfig) error {
 		}
 	}
 
-	if err := pullImage(ctx, c.Image); err != nil {
-		return fmt.Errorf("pull image %q failed: %w", c.Image, err)
+	present, err := imageExists(ctx, c.Image)
+	if err != nil {
+		return fmt.Errorf("check image %q failed: %w", c.Image, err)
+	}
+	if !present {
+		if err := pullImage(ctx, c.Image); err != nil {
+			return fmt.Errorf("pull image %q failed: %w", c.Image, err)
+		}
 	}
 
 	if exists {
@@ -1834,6 +1841,30 @@ func createSpec(c ContainerConfig) (*containerSpec, error) {
 	}
 
 	return s, nil
+}
+
+// imageExists reports whether an image reference is already present in local
+// storage, using the same 204/404 exists endpoint pattern as containerExists.
+func imageExists(ctx context.Context, rawImage string) (bool, error) {
+	conn, err := bindings.GetClient(ctx)
+	if err != nil {
+		return false, err
+	}
+
+	response, err := conn.DoRequest(ctx, nil, http.MethodGet, "/images/%s/exists", nil, nil, rawImage)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = response.Body.Close() }()
+
+	if response.IsSuccess() {
+		return true, nil
+	}
+	if response.StatusCode == http.StatusNotFound {
+		return false, nil
+	}
+
+	return false, response.Process(nil)
 }
 
 func pullImage(ctx context.Context, rawImage string) error {

@@ -152,6 +152,15 @@ JSON document. The service validates the body, writes it atomically to the activ
 curl -X POST --data-binary @config.json http://node:8080/servermaster/config
 ```
 
+### Restart
+
+`POST /servermaster/restart` schedules a host reboot. The response is written
+before the reboot is triggered.
+
+```sh
+curl -X POST http://node:8080/servermaster/restart
+```
+
 ### OS Updates
 
 The OS update endpoints stage and apply an ostree/bootc update tarball:

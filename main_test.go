@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -1081,6 +1082,12 @@ func stubServermasterStatusCollector(fn func(context.Context, string) servermast
 	return func() { servermasterStatusCollector = prev }
 }
 
+func stubRebootScheduler(fn func()) func() {
+	prev := rebootScheduler
+	rebootScheduler = fn
+	return func() { rebootScheduler = prev }
+}
+
 func TestHandleServermasterStatusMethodNotAllowed(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, apiStatusPath, nil)
 	rec := httptest.NewRecorder()
@@ -1338,6 +1345,35 @@ func TestHandleConfigUploadApplyFailure(t *testing.T) {
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("config must remain saved after an apply failure: %v", err)
 	}
+}
+
+func TestHandleRestart(t *testing.T) {
+	t.Run("method not allowed", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, apiRestartPath, nil)
+		rec := httptest.NewRecorder()
+		handleRestart(rec, req)
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("status = %d, want 405", rec.Code)
+		}
+	})
+
+	t.Run("post schedules reboot", func(t *testing.T) {
+		called := make(chan struct{}, 1)
+		defer stubRebootScheduler(func() { called <- struct{}{} })()
+
+		req := httptest.NewRequest(http.MethodPost, apiRestartPath, nil)
+		rec := httptest.NewRecorder()
+		handleRestart(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+
+		select {
+		case <-called:
+		case <-time.After(time.Second):
+			t.Fatal("reboot was not scheduled")
+		}
+	})
 }
 
 func TestOstreeUploadPath(t *testing.T) {

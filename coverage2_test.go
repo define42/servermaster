@@ -49,6 +49,7 @@ func TestStartWebServer(t *testing.T) {
 	// registration without invoking the heavy collectors.
 	assertStatus(t, http.MethodPost, "http://"+addr+apiStatusPath, http.StatusMethodNotAllowed)
 	assertStatus(t, http.MethodGet, "http://"+addr+apiConfigPath, http.StatusMethodNotAllowed)
+	assertStatus(t, http.MethodGet, "http://"+addr+apiRestartPath, http.StatusMethodNotAllowed)
 	assertStatus(t, http.MethodGet, "http://"+addr+apiOstreeUploadPath, http.StatusMethodNotAllowed)
 	assertStatus(t, http.MethodGet, "http://"+addr+apiOstreeUpgradePath, http.StatusMethodNotAllowed)
 

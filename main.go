@@ -49,6 +49,7 @@ const (
 	apiHealthPath           = "/servermaster/health"
 	apiStatusPath           = "/servermaster/status"
 	apiConfigPath           = "/servermaster/config"
+	apiRestartPath          = "/servermaster/restart"
 	apiOstreeUploadPath     = "/servermaster/ostree/upload"
 	apiOstreeUpgradePath    = "/servermaster/ostree/upgrade"
 
@@ -95,6 +96,12 @@ var configApplier = applyConfig
 //
 //nolint:gochecknoglobals // injectable seam so the handler can be tested without Podman or ostree.
 var servermasterStatusCollector = collectServermasterStatus
+
+// rebootScheduler performs the delayed host reboot. Tests replace it so handler
+// paths can be exercised without rebooting the machine.
+//
+//nolint:gochecknoglobals // injectable seam so rebooting endpoints are testable.
+var rebootScheduler = scheduleReboot
 
 // serviceLog retains the most recent log lines in memory so the
 // /servermaster/status endpoint can surface them in servermaster_log.
@@ -548,6 +555,7 @@ func startWebServer(address string, configPath string) (*http.Server, <-chan err
 	mux.HandleFunc(apiConfigPath, func(w http.ResponseWriter, r *http.Request) {
 		handleConfigUpload(w, r, configPath)
 	})
+	mux.HandleFunc(apiRestartPath, handleRestart)
 	mux.HandleFunc(apiOstreeUploadPath, func(w http.ResponseWriter, r *http.Request) {
 		handleOstreeUpload(w, r, configPath)
 	})
@@ -1054,6 +1062,21 @@ func handleConfigUpload(w http.ResponseWriter, r *http.Request, configPath strin
 	_, _ = fmt.Fprintf(w, "config saved to %s and applied\n", configPath)
 }
 
+// handleRestart schedules a host reboot. It is unauthenticated: anyone who can
+// reach :8080 can reboot the node.
+func handleRestart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	log.Println("restart requested; scheduling reboot")
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = fmt.Fprintln(w, "rebooting")
+	go rebootScheduler()
+}
+
 // writeConfigFile writes the config body to a temp file in the destination
 // directory and renames it into place, so a crash mid-write can never leave a
 // truncated config where the next boot would load it.
@@ -1185,7 +1208,7 @@ func handleOstreeUpgrade(w http.ResponseWriter, r *http.Request, configPath stri
 
 	log.Println("ostree update applied; scheduling reboot")
 	_, _ = fmt.Fprintln(w, "update applied; rebooting")
-	go scheduleReboot()
+	go rebootScheduler()
 }
 
 func ostreeUploadPath(cfg *Config) string {

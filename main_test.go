@@ -124,6 +124,59 @@ func TestValidateFirewallProtocol(t *testing.T) {
 	}
 }
 
+func TestFirewallPortKey(t *testing.T) {
+	tests := []struct {
+		name     string
+		port     string
+		protocol string
+		want     string
+	}{
+		{"tcp", "8080", "tcp", "8080/tcp"},
+		{"empty protocol defaults tcp", "8080", "", "8080/tcp"},
+		{"uppercase protocol", "53", "UDP", "53/udp"},
+		{"trims whitespace", " 8000-8010 ", " tcp ", "8000-8010/tcp"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := firewallPortKey(tt.port, tt.protocol); got != tt.want {
+				t.Fatalf("firewallPortKey(%q, %q) = %q, want %q", tt.port, tt.protocol, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDeclaredFirewallPorts(t *testing.T) {
+	ports := []FirewallPortConfig{
+		{Port: "8080", Protocol: "tcp"}, // empty zone -> default
+		{Zone: "public", Port: "443"},   // explicit zone, default proto
+		{Zone: "internal", Port: "53", Protocol: "udp"},
+		{Port: "8080", Protocol: "tcp"}, // duplicate of the first
+	}
+
+	declared := declaredFirewallPorts(ports, "public")
+
+	// The empty-zone 8080/tcp and the explicit public 443/tcp both land in public.
+	public := declared["public"]
+	if len(public) != 2 {
+		t.Fatalf("public zone keys = %v, want 2 entries", public)
+	}
+	if _, ok := public["8080/tcp"]; !ok {
+		t.Fatalf("public zone missing 8080/tcp: %v", public)
+	}
+	if _, ok := public["443/tcp"]; !ok {
+		t.Fatalf("public zone missing 443/tcp: %v", public)
+	}
+
+	internal := declared["internal"]
+	if _, ok := internal["53/udp"]; !ok || len(internal) != 1 {
+		t.Fatalf("internal zone = %v, want only 53/udp", internal)
+	}
+
+	if _, ok := declared["dmz"]; ok {
+		t.Fatalf("undeclared zone dmz should be absent: %v", declared)
+	}
+}
+
 func TestValidateSELinuxRelabel(t *testing.T) {
 	tests := []struct {
 		name    string

@@ -18,7 +18,8 @@ On startup, and after a successful remote config upload, `servermaster`:
 2. Reads the active JSON config file.
 3. Creates declared host folders with the requested mode and owner.
 4. Applies declared host interface settings through `nmstatectl`.
-5. Opens declared firewalld ports in runtime and permanent configuration.
+5. Opens declared firewalld ports in runtime and permanent configuration, and
+   closes any open port not declared in the config.
 6. Starts the rootful `podman.socket` through systemd.
 7. Waits for the Podman Unix socket to become reachable.
 8. Stops running containers that are not declared in the config.
@@ -182,6 +183,13 @@ list.
 Firewall ports are opened through firewalld's D-Bus API. Each port is written to
 both runtime configuration for immediate effect and permanent configuration for
 reload and reboot persistence. An empty `zone` uses firewalld's default zone.
+
+`firewall_ports` is the single source of truth for open ports: on every reconcile
+`servermaster` closes any port open in firewalld — in any zone, in both runtime
+and permanent config — that is not declared here, just as it stops undeclared
+containers. An empty (or omitted) `firewall_ports` therefore closes all open
+ports. firewalld *services* (for example `ssh`, `cockpit`) are not ports and are
+left untouched, so SSH access configured as a service is not affected.
 
 - `zone`: optional firewalld zone
 - `port`: port or port range as a string, for example `8080` or `8000-8010`

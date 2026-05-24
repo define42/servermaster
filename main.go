@@ -1262,11 +1262,13 @@ func parseGroup(value string) (int, error) {
 	return gid, nil
 }
 
+// configureFirewallPorts enforces config.json as the single source of truth for
+// open firewall ports: it opens (and persists) every declared port, then closes
+// any port currently open in firewalld that is not declared. Because the config
+// owns the entire port set, an empty list is not a no-op — it still runs the
+// cleanup so no undeclared port is left open. firewalld *services* (for example
+// ssh, cockpit) are not ports and are intentionally left untouched.
 func configureFirewallPorts(ports []FirewallPortConfig) error {
-	if len(ports) == 0 {
-		return nil
-	}
-
 	conn, err := dbus.ConnectSystemBus()
 	if err != nil {
 		return fmt.Errorf("connect to system bus failed: %w", err)
@@ -1275,6 +1277,12 @@ func configureFirewallPorts(ports []FirewallPortConfig) error {
 
 	firewalld := conn.Object(firewalldBusName, dbus.ObjectPath(firewalldObjectPath))
 	config := conn.Object(firewalldBusName, dbus.ObjectPath(firewalldConfigPath))
+
+	var defaultZone string
+	if err := firewalld.Call(firewalldBusName+".getDefaultZone", 0).Store(&defaultZone); err != nil {
+		return fmt.Errorf("get default zone failed: %w", err)
+	}
+
 	for _, port := range ports {
 		zone := strings.TrimSpace(port.Zone)
 		portValue := strings.TrimSpace(port.Port)
@@ -1298,6 +1306,108 @@ func configureFirewallPorts(ports []FirewallPortConfig) error {
 		// Permanent config survives a firewalld reload and a reboot.
 		if err := ensurePermanentFirewallPort(conn, firewalld, config, zone, portValue, protocol); err != nil {
 			return fmt.Errorf("persist firewall port %s/%s failed: %w", portValue, protocol, err)
+		}
+	}
+
+	declared := declaredFirewallPorts(ports, defaultZone)
+	if err := removeUnmanagedFirewallPorts(conn, firewalld, config, declared); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// firewallPortTuple decodes a firewalld permanent-config (port, protocol) struct
+// (D-Bus signature `(ss)`).
+type firewallPortTuple struct {
+	Port     string
+	Protocol string
+}
+
+// firewallPortKey normalizes a port and protocol into a comparison key, applying
+// the same defaulting (lowercase protocol, empty protocol means tcp) used when
+// opening declared ports so declared and live ports compare equal.
+func firewallPortKey(port, protocol string) string {
+	protocol = strings.ToLower(strings.TrimSpace(protocol))
+	if protocol == "" {
+		protocol = "tcp"
+	}
+	return strings.TrimSpace(port) + "/" + protocol
+}
+
+// declaredFirewallPorts groups the config ports by their resolved zone, returning
+// per-zone sets of "port/proto" keys. An empty zone resolves to defaultZone, the
+// same substitution firewalld makes when a port is opened without a zone.
+func declaredFirewallPorts(ports []FirewallPortConfig, defaultZone string) map[string]map[string]struct{} {
+	declared := make(map[string]map[string]struct{})
+	for _, port := range ports {
+		zone := strings.TrimSpace(port.Zone)
+		if zone == "" {
+			zone = defaultZone
+		}
+		if declared[zone] == nil {
+			declared[zone] = make(map[string]struct{})
+		}
+		declared[zone][firewallPortKey(port.Port, port.Protocol)] = struct{}{}
+	}
+	return declared
+}
+
+// removeUnmanagedFirewallPorts closes every open port not present in declared,
+// in both the runtime and permanent firewalld configuration and across every
+// zone, so a port opened out of band cannot survive a reconcile. declared maps a
+// zone name to the set of "port/proto" keys allowed in that zone.
+func removeUnmanagedFirewallPorts(conn *dbus.Conn, firewalld, config dbus.BusObject, declared map[string]map[string]struct{}) error {
+	// Runtime config: closing takes effect immediately.
+	var runtimeZones []string
+	if err := firewalld.Call(firewalldZoneInterface+".getZones", 0).Store(&runtimeZones); err != nil {
+		return fmt.Errorf("list runtime firewall zones failed: %w", err)
+	}
+	for _, zone := range runtimeZones {
+		var current [][]string
+		if err := firewalld.Call(firewalldZoneInterface+".getPorts", 0, zone).Store(&current); err != nil {
+			return fmt.Errorf("list runtime ports for zone %q failed: %w", zone, err)
+		}
+		for _, pp := range current {
+			if len(pp) != 2 {
+				continue
+			}
+			port, protocol := pp[0], pp[1]
+			if _, ok := declared[zone][firewallPortKey(port, protocol)]; ok {
+				continue
+			}
+			var appliedZone string
+			if err := firewalld.Call(firewalldZoneInterface+".removePort", 0, zone, port, protocol).Store(&appliedZone); err != nil {
+				return fmt.Errorf("close unmanaged firewall port %s/%s in zone %q failed: %w", port, protocol, zone, err)
+			}
+			log.Printf("closed unmanaged firewall port %s/%s in zone %s", port, protocol, zone)
+		}
+	}
+
+	// Permanent config: closing survives a firewalld reload and a reboot.
+	var permanentZones []string
+	if err := config.Call(firewalldConfigInterface+".getZoneNames", 0).Store(&permanentZones); err != nil {
+		return fmt.Errorf("list permanent firewall zones failed: %w", err)
+	}
+	for _, zone := range permanentZones {
+		var zonePath dbus.ObjectPath
+		if err := config.Call(firewalldConfigInterface+".getZoneByName", 0, zone).Store(&zonePath); err != nil {
+			return fmt.Errorf("look up permanent zone %q failed: %w", zone, err)
+		}
+		zoneObject := conn.Object(firewalldBusName, zonePath)
+
+		var current []firewallPortTuple
+		if err := zoneObject.Call(firewalldConfigZoneInterface+".getPorts", 0).Store(&current); err != nil {
+			return fmt.Errorf("list permanent ports for zone %q failed: %w", zone, err)
+		}
+		for _, pp := range current {
+			if _, ok := declared[zone][firewallPortKey(pp.Port, pp.Protocol)]; ok {
+				continue
+			}
+			if err := zoneObject.Call(firewalldConfigZoneInterface+".removePort", 0, pp.Port, pp.Protocol).Err; err != nil {
+				return fmt.Errorf("remove permanent firewall port %s/%s in zone %q failed: %w", pp.Port, pp.Protocol, zone, err)
+			}
+			log.Printf("removed unmanaged permanent firewall port %s/%s in zone %s", pp.Port, pp.Protocol, zone)
 		}
 	}
 

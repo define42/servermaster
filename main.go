@@ -44,6 +44,12 @@ const (
 	firewalldBusName       = "org.fedoraproject.FirewallD1"
 	firewalldObjectPath    = "/org/fedoraproject/FirewallD1"
 	firewalldZoneInterface = "org.fedoraproject.FirewallD1.zone"
+
+	// Permanent configuration lives behind the config interface, addressed by
+	// an explicit zone name, and survives a firewalld reload and reboot.
+	firewalldConfigPath          = "/org/fedoraproject/FirewallD1/config"
+	firewalldConfigInterface     = "org.fedoraproject.FirewallD1.config"
+	firewalldConfigZoneInterface = "org.fedoraproject.FirewallD1.config.zone"
 )
 
 type Config struct {
@@ -678,6 +684,7 @@ func configureFirewallPorts(ports []FirewallPortConfig) error {
 	defer func() { _ = conn.Close() }()
 
 	firewalld := conn.Object(firewalldBusName, dbus.ObjectPath(firewalldObjectPath))
+	config := conn.Object(firewalldBusName, dbus.ObjectPath(firewalldConfigPath))
 	for _, port := range ports {
 		zone := strings.TrimSpace(port.Zone)
 		portValue := strings.TrimSpace(port.Port)
@@ -686,19 +693,22 @@ func configureFirewallPorts(ports []FirewallPortConfig) error {
 			protocol = "tcp"
 		}
 
+		// Runtime config takes effect immediately, without a firewalld reload.
 		enabled, err := queryFirewallPort(firewalld, zone, portValue, protocol)
 		if err != nil {
 			return fmt.Errorf("query firewall port %s/%s failed: %w", portValue, protocol, err)
 		}
-		if enabled {
-			continue
+		if !enabled {
+			if err := addFirewallPort(firewalld, zone, portValue, protocol); err != nil {
+				return fmt.Errorf("open firewall port %s/%s failed: %w", portValue, protocol, err)
+			}
+			log.Printf("opened firewall port %s/%s", portValue, protocol)
 		}
 
-		if err := addFirewallPort(firewalld, zone, portValue, protocol); err != nil {
-			return fmt.Errorf("open firewall port %s/%s failed: %w", portValue, protocol, err)
+		// Permanent config survives a firewalld reload and a reboot.
+		if err := ensurePermanentFirewallPort(conn, firewalld, config, zone, portValue, protocol); err != nil {
+			return fmt.Errorf("persist firewall port %s/%s failed: %w", portValue, protocol, err)
 		}
-
-		log.Printf("opened firewall port %s/%s", portValue, protocol)
 	}
 
 	return nil
@@ -713,6 +723,42 @@ func queryFirewallPort(firewalld dbus.BusObject, zone string, port string, proto
 func addFirewallPort(firewalld dbus.BusObject, zone string, port string, protocol string) error {
 	var appliedZone string
 	return firewalld.Call(firewalldZoneInterface+".addPort", 0, zone, port, protocol, int32(0)).Store(&appliedZone)
+}
+
+// ensurePermanentFirewallPort writes the port into firewalld's permanent
+// configuration. The runtime config opened above is reset to the permanent
+// config on `firewall-cmd --reload`, so without this the port would silently
+// close until the next reconcile at boot. An empty zone resolves to firewalld's
+// default zone, since the permanent config is addressed by an explicit name.
+func ensurePermanentFirewallPort(conn *dbus.Conn, firewalld, config dbus.BusObject, zone, port, protocol string) error {
+	zoneName := zone
+	if zoneName == "" {
+		if err := firewalld.Call(firewalldBusName+".getDefaultZone", 0).Store(&zoneName); err != nil {
+			return fmt.Errorf("get default zone failed: %w", err)
+		}
+	}
+
+	var zonePath dbus.ObjectPath
+	if err := config.Call(firewalldConfigInterface+".getZoneByName", 0, zoneName).Store(&zonePath); err != nil {
+		return fmt.Errorf("look up permanent zone %q failed: %w", zoneName, err)
+	}
+
+	zoneObject := conn.Object(firewalldBusName, zonePath)
+
+	var enabled bool
+	if err := zoneObject.Call(firewalldConfigZoneInterface+".queryPort", 0, port, protocol).Store(&enabled); err != nil {
+		return fmt.Errorf("query permanent firewall port failed: %w", err)
+	}
+	if enabled {
+		return nil
+	}
+
+	if err := zoneObject.Call(firewalldConfigZoneInterface+".addPort", 0, port, protocol).Err; err != nil {
+		return fmt.Errorf("add permanent firewall port failed: %w", err)
+	}
+
+	log.Printf("persisted firewall port %s/%s in zone %s", port, protocol, zoneName)
+	return nil
 }
 
 func startPodmanSocket(mode PodmanMode) error {

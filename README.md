@@ -104,7 +104,7 @@ Host interface changes are applied declaratively through NetworkManager with `nm
 
 ### Firewall port object
 
-Firewall ports are opened with `github.com/godbus/dbus/v5` against firewalld's runtime D-Bus API.
+Firewall ports are opened with `github.com/godbus/dbus/v5` against firewalld's D-Bus API. Each port is written to both the runtime configuration (immediate effect, no reload) and the permanent configuration (survives `firewall-cmd --reload` and reboot). An empty `zone` resolves to firewalld's default zone.
 
 - `zone`: optional firewalld zone (empty uses the default zone)
 - `port`: port or port range as a string (for example `8080` or `8000-8010`)

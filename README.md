@@ -111,6 +111,8 @@ management network.
 - running Podman containers
 - image and version metadata where available
 - the last 100 log lines from each running container
+- `servermaster_log`: the last 100 log lines from the `servermaster` service
+  itself (its own `log` output, also sent to stderr/journald)
 - status collection errors, if any
 
 ```sh

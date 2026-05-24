@@ -84,6 +84,56 @@ var configApplier = applyConfig
 // it so the handler can be exercised without requiring Podman or ostree.
 var servermasterStatusCollector = collectServermasterStatus
 
+// serviceLog retains the most recent log lines in memory so the /servermaster
+// endpoint can surface them in servermaster_log. captureServiceLog tees the
+// standard logger into it at startup.
+var serviceLog = newLogRing(servermasterLogTail)
+
+// logRing is a bounded, concurrency-safe buffer of the most recent log lines. It
+// is an io.Writer, so installing it as (part of) the standard logger's output
+// captures every log.Print* call. The standard logger writes one full record per
+// Write, so each Write is stored as one line.
+type logRing struct {
+	mu    sync.Mutex
+	lines []string
+	max   int
+}
+
+func newLogRing(max int) *logRing {
+	return &logRing{max: max}
+}
+
+func (r *logRing) Write(p []byte) (int, error) {
+	line := strings.TrimRight(string(p), "\n")
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lines = append(r.lines, line)
+	if len(r.lines) > r.max {
+		// Copy the tail into a fresh slice so the dropped lines' backing array is
+		// released rather than retained behind a reslice.
+		r.lines = append([]string(nil), r.lines[len(r.lines)-r.max:]...)
+	}
+	return len(p), nil
+}
+
+// snapshot returns a copy of the retained lines, oldest first. It is always
+// non-nil so the JSON field renders as [] rather than null when empty.
+func (r *logRing) snapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, len(r.lines))
+	copy(out, r.lines)
+	return out
+}
+
+// captureServiceLog tees the standard logger to its existing destination and the
+// in-memory ring, so logs still reach stderr/journald while becoming queryable
+// via /servermaster.
+func captureServiceLog() {
+	log.SetOutput(io.MultiWriter(log.Writer(), serviceLog))
+}
+
 type Config struct {
 	PodmanMode    string               `json:"podman_mode"`
 	Folders       []FolderConfig       `json:"folders"`
@@ -214,13 +264,14 @@ type listedContainer struct {
 }
 
 type servermasterStatus struct {
-	Status        string                   `json:"status"`
-	GeneratedAt   string                   `json:"generated_at"`
-	Ostree        ostreeStatus             `json:"ostree"`
-	FreeDiskSpace []diskStatus             `json:"free_diskspace"`
-	Network       networkStatus            `json:"network"`
-	Containers    []runningContainerStatus `json:"containers"`
-	Errors        []string                 `json:"errors,omitempty"`
+	Status          string                   `json:"status"`
+	GeneratedAt     string                   `json:"generated_at"`
+	Ostree          ostreeStatus             `json:"ostree"`
+	FreeDiskSpace   []diskStatus             `json:"free_diskspace"`
+	Network         networkStatus            `json:"network"`
+	Containers      []runningContainerStatus `json:"containers"`
+	ServermasterLog []string                 `json:"servermaster_log"`
+	Errors          []string                 `json:"errors,omitempty"`
 }
 
 // networkStatus is the live network configuration of every host interface, read
@@ -325,6 +376,8 @@ type rpmOstreeDeployment struct {
 }
 
 func main() {
+	captureServiceLog()
+
 	configPath := flag.String("config", defaultConfigPath, "path to config JSON file")
 	flag.Parse()
 
@@ -464,6 +517,9 @@ func collectServermasterStatus(ctx context.Context, configPath string) servermas
 			status.Errors = append(status.Errors, fmt.Sprintf("container %s: %s", container.Name, container.Error))
 		}
 	}
+
+	// Captured after the other collectors so their log output is reflected.
+	status.ServermasterLog = serviceLog.snapshot()
 
 	if len(status.Errors) > 0 {
 		status.Status = "degraded"

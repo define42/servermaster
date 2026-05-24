@@ -26,11 +26,19 @@ const (
 )
 
 // The service runs as root, so no dedicated user is created. These scriptlets
-// mirror the systemd rpm macros: reload on install, disable on final removal,
-// and restart on upgrade. $1 is the count of package instances that will remain
-// after the transaction (0 = the package is being removed entirely).
+// mirror the systemd rpm macros: reload on install, apply preset policy on
+// initial install, disable on final removal, and restart on upgrade. $1 is the
+// count of package instances that will remain after the transaction (0 = the
+// package is being removed entirely, 1 = initial install, >1 = upgrade).
+//
+// preset (rather than a forced enable) honors the host's systemd preset policy,
+// so installing the package enables the unit only where policy allows and never
+// starts it; an operator still runs `systemctl start` (or reboots) to launch it.
 const postinScript = `if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload || :
+    if [ "$1" = 1 ]; then
+        systemctl --no-reload preset servermaster.service || :
+    fi
 fi
 `
 

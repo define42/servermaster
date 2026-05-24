@@ -6,7 +6,7 @@ Requires=podman.socket
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/servermaster -config /data/config/containers.json
+ExecStart=/usr/bin/servermaster -config /etc/servermaster.json
 Restart=always
 RestartSec=10s
 User=root

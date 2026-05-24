@@ -277,14 +277,15 @@ func TestHandleOstreeUpgradeLoadConfigError(t *testing.T) {
 }
 
 func TestConfigureHostInterfaces(t *testing.T) {
-	if err := configureHostInterfaces(nil); err != nil {
-		t.Fatalf("empty interfaces should be a no-op: %v", err)
-	}
-
 	prev := nmstateStatePath
 	nmstateStatePath = filepath.Join(t.TempDir(), "nmstate", "state.yml")
 	defer func() { nmstateStatePath = prev }()
 	fakeCommand(t, "nmstatectl", "exit 0")
+
+	// No declared interfaces and no existing state file: nothing to remove.
+	if err := configureHostInterfaces(nil); err != nil {
+		t.Fatalf("empty interfaces should be a no-op: %v", err)
+	}
 
 	ifaces := []InterfaceConfig{{Name: "eth0", IPAddress: "10.0.0.2", Subnet: "10.0.0.0/24"}}
 	if err := configureHostInterfaces(ifaces); err != nil {
@@ -292,6 +293,15 @@ func TestConfigureHostInterfaces(t *testing.T) {
 	}
 	if _, err := os.Stat(nmstateStatePath); err != nil {
 		t.Fatalf("desired-state file not written: %v", err)
+	}
+
+	// Dropping all interfaces must remove the state file so nmstate.service
+	// does not reapply the stale config at the next boot.
+	if err := configureHostInterfaces(nil); err != nil {
+		t.Fatalf("removing declared interfaces should succeed: %v", err)
+	}
+	if _, err := os.Stat(nmstateStatePath); !os.IsNotExist(err) {
+		t.Fatalf("stale desired-state file not removed: stat err = %v", err)
 	}
 
 	if err := configureHostInterfaces([]InterfaceConfig{{Name: ""}}); err == nil {
@@ -308,6 +318,19 @@ func TestConfigureHostInterfacesApplyFails(t *testing.T) {
 	err := configureHostInterfaces([]InterfaceConfig{{Name: "eth0"}})
 	if err == nil || !strings.Contains(err.Error(), "apply host interface configuration failed") {
 		t.Fatalf("err = %v, want apply failure", err)
+	}
+	// A failed apply must not leave a document at the canonical path, or
+	// nmstate.service would reapply the never-validated config at boot.
+	if _, statErr := os.Stat(nmstateStatePath); !os.IsNotExist(statErr) {
+		t.Fatalf("apply failure left a state file behind: stat err = %v", statErr)
+	}
+	// And it must not leave temp files littering the directory either.
+	entries, readErr := os.ReadDir(filepath.Dir(nmstateStatePath))
+	if readErr != nil {
+		t.Fatalf("read nmstate dir: %v", readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("apply failure left files behind: %v", entries)
 	}
 }
 

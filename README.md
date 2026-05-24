@@ -34,10 +34,10 @@ On startup, and after a successful remote config upload, `servermaster`:
 ## Usage
 
 ```sh
-servermaster -config /data/config/containers.json
+servermaster -config /etc/servermaster.json
 ```
 
-If `-config` is omitted, it defaults to `/data/config/containers.json`.
+If `-config` is omitted, it defaults to `/etc/servermaster.json`.
 The binary has no `install` subcommand or flag; it always starts the service
 process.
 
@@ -49,7 +49,7 @@ A systemd unit ships in this repo as
 [`servermaster.service`](servermaster.service). It runs:
 
 ```sh
-/usr/bin/servermaster -config /data/config/containers.json
+/usr/bin/servermaster -config /etc/servermaster.json
 ```
 
 For a manual systemd installation, place the binary where the unit expects it,

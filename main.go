@@ -40,7 +40,7 @@ import (
 )
 
 const (
-	defaultConfigPath       = "/data/config/containers.json"
+	defaultConfigPath       = "/etc/servermaster.json"
 	webServerAddress        = ":8080"
 	defaultOstreeUploadPath = "/data/ostree/update.tar"
 	podmanRootfulMode       = "rootful"
@@ -3151,7 +3151,13 @@ func resolvConfNameservers(path string) []string {
 }
 
 func configureHostInterfaces(interfaces []InterfaceConfig) error {
+	// No interfaces are declared, so config.json is the source of truth: remove
+	// any state file we previously wrote, otherwise nmstate.service would
+	// reapply that stale network config at the next boot.
 	if len(interfaces) == 0 {
+		if err := os.Remove(nmstateStatePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove stale nmstate document %q failed: %w", nmstateStatePath, err)
+		}
 		return nil
 	}
 
@@ -3168,16 +3174,40 @@ func configureHostInterfaces(interfaces []InterfaceConfig) error {
 	if err := os.MkdirAll(filepath.Dir(nmstateStatePath), 0o755); err != nil { //nolint:gosec // /etc/nmstate must stay traversable so nmstate.service can read the state at boot.
 		return fmt.Errorf("create nmstate dir %q failed: %w", filepath.Dir(nmstateStatePath), err)
 	}
-	if err := os.WriteFile(nmstateStatePath, document, 0o644); err != nil { //nolint:gosec // nmstate.service reads this file to reapply network state at boot; not secret.
-		return fmt.Errorf("write nmstate document %q failed: %w", nmstateStatePath, err)
+
+	// Write to a temp file in the same directory and apply that. Only rename it
+	// onto the canonical path once nmstatectl has accepted it, so a failed apply
+	// never leaves a document that nmstate.service would reapply at boot. The
+	// temp lives beside the target so the rename stays atomic on one filesystem.
+	tmp, err := os.CreateTemp(filepath.Dir(nmstateStatePath), ".servermaster.*.yml.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp nmstate document in %q failed: %w", filepath.Dir(nmstateStatePath), err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath) // no-op once the successful rename has moved it away
+
+	if _, err := tmp.Write(document); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write temp nmstate document %q failed: %w", tmpPath, err)
+	}
+	if err := tmp.Chmod(0o644); err != nil { //nolint:gosec // nmstate.service reads this file to reapply network state at boot; not secret.
+		tmp.Close()
+		return fmt.Errorf("chmod temp nmstate document %q failed: %w", tmpPath, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp nmstate document %q failed: %w", tmpPath, err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), nmstateApplyTimeout+30*time.Second)
 	defer cancel()
 
 	nmTimeout := strconv.Itoa(int(nmstateApplyTimeout.Seconds()))
-	if _, err := runCommandOutput(ctx, "nmstatectl", "apply", "--timeout", nmTimeout, nmstateStatePath); err != nil {
+	if _, err := runCommandOutput(ctx, "nmstatectl", "apply", "--timeout", nmTimeout, tmpPath); err != nil {
 		return fmt.Errorf("apply host interface configuration failed: %w", err)
+	}
+
+	if err := os.Rename(tmpPath, nmstateStatePath); err != nil {
+		return fmt.Errorf("commit nmstate document to %q failed: %w", nmstateStatePath, err)
 	}
 
 	// nmstate has no transmit-queue-length field, so apply it through netlink

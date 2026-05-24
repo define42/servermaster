@@ -671,15 +671,14 @@ func TestConfigHash(t *testing.T) {
 		Ports: []PortConfig{{HostPort: 8081, ContainerPort: 80}},
 	}
 
-	if configHash(base) != configHash(base) {
-		t.Fatal("hash is not stable for identical config")
-	}
+	baseHash := configHash(base)
 
-	// Map ordering must not affect the hash (Go marshals map keys sorted).
+	// Map ordering must not affect the hash (Go marshals map keys sorted), and an
+	// equal config must produce an equal hash.
 	reordered := base
 	reordered.Env = map[string]string{"B": "2", "A": "1"}
-	if configHash(base) != configHash(reordered) {
-		t.Fatal("hash changed when only map literal order differed")
+	if configHash(reordered) != baseHash {
+		t.Fatal("hash changed for an equal config (map literal order should not matter)")
 	}
 
 	changes := map[string]ContainerConfig{
@@ -689,7 +688,7 @@ func TestConfigHash(t *testing.T) {
 		"restart": {Name: "web", Image: "docker.io/library/nginx:1.25", Restart: "always"},
 	}
 	for name, changed := range changes {
-		if configHash(base) == configHash(changed) {
+		if configHash(changed) == baseHash {
 			t.Fatalf("hash did not change when %s changed", name)
 		}
 	}

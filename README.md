@@ -1,5 +1,5 @@
 # servermaster
-
+[![codecov](https://codecov.io/gh/define42/servermaster/graph/badge.svg?token=CI1DDQT3O4)](https://codecov.io/gh/define42/servermaster)
 `servermaster` is a Go service for declaratively configuring a Red Hat Device
 Edge node without MicroShift. It manages host folders, host files, host network
 interfaces, firewalld ports, OS update staging, and Podman containers directly

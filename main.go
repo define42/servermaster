@@ -41,6 +41,15 @@ const (
 	servermasterLogTail     = 100
 	statusCommandTimeout    = 5 * time.Second
 
+	// nmstateApplyTimeout bounds `nmstatectl apply`'s verify-and-rollback cycle
+	// (passed as --timeout). An interface that cannot reach its desired state —
+	// for example a declared device that does not exist on the host — makes the
+	// apply roll back and fail at this deadline instead of blocking forever. The
+	// exec gets a slightly longer hard deadline (nmstateApplyTimeout + buffer) so
+	// a wedged nmstatectl cannot hang the reconcile, and the /config request that
+	// holds applyMu, indefinitely.
+	nmstateApplyTimeout = 60 * time.Second
+
 	// maxConfigUploadBytes caps the body accepted by /config. A node config is
 	// a small JSON document; the limit stops an unauthenticated caller from
 	// streaming an arbitrarily large body into memory.
@@ -118,6 +127,7 @@ type ContainerConfig struct {
 
 type InterfaceConfig struct {
 	Name      string   `json:"name"`
+	Type      string   `json:"type"`
 	IPAddress string   `json:"ip_address"`
 	Subnet    string   `json:"subnet"`
 	Gateway   string   `json:"gateway"`
@@ -2523,7 +2533,11 @@ func configureHostInterfaces(interfaces []InterfaceConfig) error {
 		return fmt.Errorf("write nmstate document %q failed: %w", nmstateStatePath, err)
 	}
 
-	if err := runCommand("nmstatectl", "apply", nmstateStatePath); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), nmstateApplyTimeout+30*time.Second)
+	defer cancel()
+
+	nmTimeout := strconv.Itoa(int(nmstateApplyTimeout.Seconds()))
+	if _, err := runCommandOutput(ctx, "nmstatectl", "apply", "--timeout", nmTimeout, nmstateStatePath); err != nil {
 		return fmt.Errorf("apply host interface configuration failed: %w", err)
 	}
 
@@ -2554,9 +2568,16 @@ func buildNMState(interfaces []InterfaceConfig) (*nmState, error) {
 			return nil, fmt.Errorf("host interface %q must set both ip_address and subnet", iface.Name)
 		}
 
-		// Existing physical NICs (the documented use case, e.g. eth0). Bonds,
-		// VLANs, and bridges are out of scope for this schema.
-		nmIface := nmInterface{Name: iface.Name, Type: "ethernet", State: "up"}
+		// Defaults to a physical NIC (the documented use case, e.g. eth0). An
+		// explicit type lets nmstate manage other kinds it supports — for example
+		// "dummy" for a software test interface. nmstate validates the value at
+		// apply time. Bonds, VLANs, and bridges need extra params and remain out
+		// of scope for this schema.
+		ifaceType := strings.TrimSpace(iface.Type)
+		if ifaceType == "" {
+			ifaceType = "ethernet"
+		}
+		nmIface := nmInterface{Name: iface.Name, Type: ifaceType, State: "up"}
 
 		if iface.IPAddress != "" {
 			ipNet, err := parseInterfaceAddress(iface.IPAddress, iface.Subnet)

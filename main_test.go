@@ -417,6 +417,31 @@ func TestBuildNMState(t *testing.T) {
 		}
 	})
 
+	t.Run("explicit type is passed through", func(t *testing.T) {
+		state, err := buildNMState([]InterfaceConfig{{
+			Name:      "dummy0",
+			Type:      "dummy",
+			IPAddress: "192.168.1.10",
+			Subnet:    "192.168.1.0/24",
+		}})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if state.Interfaces[0].Type != "dummy" {
+			t.Fatalf("type = %q, want dummy", state.Interfaces[0].Type)
+		}
+	})
+
+	t.Run("empty type defaults to ethernet", func(t *testing.T) {
+		state, err := buildNMState([]InterfaceConfig{{Name: "eth0"}})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if state.Interfaces[0].Type != "ethernet" {
+			t.Fatalf("type = %q, want ethernet", state.Interfaces[0].Type)
+		}
+	})
+
 	t.Run("ipv6 gateway yields default v6 route", func(t *testing.T) {
 		state, err := buildNMState([]InterfaceConfig{{
 			Name:      "eth0",

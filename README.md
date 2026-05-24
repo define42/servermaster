@@ -195,12 +195,20 @@ directories created as needed. Content comes from the config itself.
 Host interface changes are applied through NetworkManager with `nmstatectl`.
 The generated desired state is written to `/etc/nmstate/servermaster.yml` and
 applied with `nmstatectl apply`, so the configuration persists across reboots
-and is reapplied by `nmstate.service`.
+and is reapplied by `nmstate.service`. The apply is bounded by a timeout: an
+interface that cannot reach its desired state fails the reconcile (with the
+`nmstatectl` error) rather than blocking the service.
+
+The named interface must be one NetworkManager manages (check `nmcli device
+status`); externally-created `unmanaged` devices cannot be configured this way.
 
 DNS servers from all interfaces are merged into nmstate's single global resolver
 list.
 
 - `name`: host interface name, for example `eth0`
+- `type`: nmstate interface type; defaults to `ethernet`. Set `dummy` for a
+  software test interface. The value is passed to nmstate, which validates it;
+  bonds, VLANs, and bridges need extra parameters and are not supported here.
 - `ip_address`: static IP to assign to the host interface
 - `subnet`: subnet CIDR for the host interface
 - `gateway`: default gateway IP for the host interface

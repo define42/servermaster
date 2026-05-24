@@ -5,7 +5,7 @@ It starts a small web server on port `8080`, reads a JSON config file, ensures e
 
 ## How it works
 
-1. Starts a web server on `:8080` with `/healthz`, the config-upload endpoint (see [Remote configuration](#remote-configuration)), and the OS-update endpoints (see [OS updates](#os-updates)).
+1. Starts a web server on `:8080` with `/servermaster`, the config-upload endpoint (see [Remote configuration](#remote-configuration)), and the OS-update endpoints (see [OS updates](#os-updates)).
 2. Reads container definitions from the configured JSON file.
 3. Ensures any declared host folders exist with the configured mode and owner.
 4. Applies any host interface configuration declared in the config file.
@@ -59,6 +59,14 @@ make rpm GOARCH=arm64          # cross-build for aarch64 edge devices
 Tagged releases on GitHub attach prebuilt `x86_64` and `aarch64` RPMs, so for a release you can download the package directly instead of building it.
 
 Add the resulting package to an image builder blueprint (`[[packages]]` from a custom repo) and enable the service as shown above.
+
+## Status
+
+`GET /servermaster` returns a pretty-printed JSON status document. It includes the running ostree/bootc version, free disk space, running Podman containers with image/version metadata, and the last 100 log lines from each running container.
+
+```sh
+curl http://node:8080/servermaster
+```
 
 ## Remote configuration
 

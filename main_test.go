@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -564,6 +566,111 @@ func stubConfigApplier(fn func(*Config) error) func() {
 	prev := configApplier
 	configApplier = fn
 	return func() { configApplier = prev }
+}
+
+func stubServermasterStatusCollector(fn func(context.Context, string) servermasterStatus) func() {
+	prev := servermasterStatusCollector
+	servermasterStatusCollector = fn
+	return func() { servermasterStatusCollector = prev }
+}
+
+func TestHandleServermasterStatus(t *testing.T) {
+	t.Run("method not allowed", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/servermaster", nil)
+		rec := httptest.NewRecorder()
+		handleServermasterStatus(rec, req, "unused")
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("status = %d, want 405", rec.Code)
+		}
+	})
+
+	t.Run("pretty json status", func(t *testing.T) {
+		defer stubServermasterStatusCollector(func(context.Context, string) servermasterStatus {
+			return servermasterStatus{
+				Status:      "ok",
+				GeneratedAt: "2026-05-24T12:00:00Z",
+				Ostree:      ostreeStatus{Source: "test", Version: "1.2.3", Booted: true},
+				FreeDiskSpace: []diskStatus{{
+					Path:           "/",
+					TotalBytes:     100,
+					FreeBytes:      40,
+					AvailableBytes: 30,
+					UsedBytes:      60,
+					UsedPercent:    60,
+				}},
+				Containers: []runningContainerStatus{{
+					ID:      "abc123",
+					Name:    "web",
+					State:   "running",
+					Image:   "docker.io/library/nginx:1.25",
+					Version: "1.25",
+					Logs:    []string{"stdout: ready"},
+				}},
+			}
+		})()
+
+		req := httptest.NewRequest(http.MethodGet, "/servermaster", nil)
+		rec := httptest.NewRecorder()
+		handleServermasterStatus(rec, req, "unused")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		if contentType := rec.Header().Get("Content-Type"); !strings.Contains(contentType, "application/json") {
+			t.Fatalf("Content-Type = %q, want application/json", contentType)
+		}
+		if !strings.HasPrefix(rec.Body.String(), "{\n  ") {
+			t.Fatalf("response is not pretty-printed JSON: %q", rec.Body.String())
+		}
+
+		var got servermasterStatus
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("unmarshal status: %v", err)
+		}
+		if got.Status != "ok" || got.Ostree.Version != "1.2.3" || len(got.Containers) != 1 {
+			t.Fatalf("unexpected status document: %+v", got)
+		}
+		if got.Containers[0].Logs[0] != "stdout: ready" {
+			t.Fatalf("logs = %v, want stdout line", got.Containers[0].Logs)
+		}
+	})
+}
+
+func TestImageReferenceVersion(t *testing.T) {
+	tests := []struct {
+		ref  string
+		want string
+	}{
+		{"docker.io/library/nginx:1.25", "1.25"},
+		{"localhost:5000/app/backend:v2", "v2"},
+		{"localhost:5000/app/backend", ""},
+		{"quay.io/example/app@sha256:abc", "sha256:abc"},
+		{"", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.ref, func(t *testing.T) {
+			if got := imageReferenceVersion(tt.ref); got != tt.want {
+				t.Fatalf("imageReferenceVersion(%q) = %q, want %q", tt.ref, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseRPMOstreeStatus(t *testing.T) {
+	raw := []byte(`{
+	  "deployments": [
+	    {"booted": false, "version": "old", "checksum": "oldsum"},
+	    {"booted": true, "version": "edge.1", "checksum": "newsum", "origin": "edge", "container-image-reference": "quay.io/example/os:edge.1"}
+	  ]
+	}`)
+
+	status, err := parseRPMOstreeStatus(raw)
+	if err != nil {
+		t.Fatalf("parseRPMOstreeStatus: %v", err)
+	}
+	if !status.Booted || status.Version != "edge.1" || status.Checksum != "newsum" || status.Image != "quay.io/example/os:edge.1" {
+		t.Fatalf("unexpected ostree status: %+v", status)
+	}
 }
 
 func TestWriteConfigFile(t *testing.T) {

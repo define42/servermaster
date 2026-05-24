@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -20,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/containers/podman/v5/pkg/bindings"
@@ -33,6 +35,8 @@ const (
 	defaultOstreeUploadPath = "/data/ostree/update.tar"
 	podmanRootfulMode       = "rootful"
 	podmanSocketPath        = "/run/podman/podman.sock"
+	servermasterLogTail     = 100
+	statusCommandTimeout    = 5 * time.Second
 
 	// maxConfigUploadBytes caps the body accepted by /config. A node config is
 	// a small JSON document; the limit stops an unauthenticated caller from
@@ -63,6 +67,10 @@ var applyMu sync.Mutex
 // configApplier converges the host to a parsed config. It is a package variable
 // so tests can substitute the host-mutating apply; production uses applyConfig.
 var configApplier = applyConfig
+
+// servermasterStatusCollector gathers the /servermaster response. Tests replace
+// it so the handler can be exercised without requiring Podman or ostree.
+var servermasterStatusCollector = collectServermasterStatus
 
 type Config struct {
 	PodmanMode    string               `json:"podman_mode"`
@@ -169,7 +177,71 @@ type imagePullReport struct {
 type listedContainer struct {
 	ID    string   `json:"Id"`
 	Names []string `json:"Names"`
+	Image string   `json:"Image"`
 	State string   `json:"State"`
+}
+
+type servermasterStatus struct {
+	Status        string                   `json:"status"`
+	GeneratedAt   string                   `json:"generated_at"`
+	Ostree        ostreeStatus             `json:"ostree"`
+	FreeDiskSpace []diskStatus             `json:"free_diskspace"`
+	Containers    []runningContainerStatus `json:"containers"`
+	Errors        []string                 `json:"errors,omitempty"`
+}
+
+type ostreeStatus struct {
+	Source     string `json:"source,omitempty"`
+	Version    string `json:"version,omitempty"`
+	Checksum   string `json:"checksum,omitempty"`
+	Image      string `json:"image,omitempty"`
+	Booted     bool   `json:"booted"`
+	Deployment string `json:"deployment,omitempty"`
+	Error      string `json:"error,omitempty"`
+}
+
+type diskStatus struct {
+	Path           string  `json:"path"`
+	TotalBytes     uint64  `json:"total_bytes"`
+	FreeBytes      uint64  `json:"free_bytes"`
+	AvailableBytes uint64  `json:"available_bytes"`
+	UsedBytes      uint64  `json:"used_bytes"`
+	UsedPercent    float64 `json:"used_percent"`
+}
+
+type runningContainerStatus struct {
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Names       []string `json:"names,omitempty"`
+	State       string   `json:"state"`
+	Image       string   `json:"image,omitempty"`
+	ImageID     string   `json:"image_id,omitempty"`
+	ImageDigest string   `json:"image_digest,omitempty"`
+	Version     string   `json:"version,omitempty"`
+	Logs        []string `json:"logs"`
+	Error       string   `json:"error,omitempty"`
+}
+
+type containerInspectResponse struct {
+	ID          string `json:"Id"`
+	Name        string `json:"Name"`
+	Image       string `json:"Image"`
+	ImageName   string `json:"ImageName"`
+	ImageDigest string `json:"ImageDigest"`
+}
+
+type rpmOstreeStatus struct {
+	Deployments []rpmOstreeDeployment `json:"deployments"`
+}
+
+type rpmOstreeDeployment struct {
+	Booted                  bool           `json:"booted"`
+	Version                 string         `json:"version"`
+	Checksum                string         `json:"checksum"`
+	BaseCommit              string         `json:"base-commit"`
+	ContainerImageReference string         `json:"container-image-reference"`
+	Origin                  string         `json:"origin"`
+	BaseCommitMeta          map[string]any `json:"base-commit-meta"`
 }
 
 func main() {
@@ -217,9 +289,8 @@ func startWebServer(address string, configPath string) (*http.Server, <-chan err
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = fmt.Fprintln(w, "servermaster running")
 	})
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = fmt.Fprintln(w, "ok")
+	mux.HandleFunc("/servermaster", func(w http.ResponseWriter, r *http.Request) {
+		handleServermasterStatus(w, r, configPath)
 	})
 	mux.HandleFunc("/config", func(w http.ResponseWriter, r *http.Request) {
 		handleConfigUpload(w, r, configPath)
@@ -253,6 +324,151 @@ func startWebServer(address string, configPath string) (*http.Server, <-chan err
 
 	log.Printf("webserver listening on %s", address)
 	return server, errCh, nil
+}
+
+func handleServermasterStatus(w http.ResponseWriter, r *http.Request, configPath string) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	status := servermasterStatusCollector(r.Context(), configPath)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(status); err != nil {
+		log.Printf("write servermaster status failed: %v", err)
+	}
+}
+
+func collectServermasterStatus(ctx context.Context, configPath string) servermasterStatus {
+	status := servermasterStatus{
+		Status:      "ok",
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		status.Errors = append(status.Errors, fmt.Sprintf("load config: %v", err))
+	}
+
+	ostree, err := collectOstreeStatus(ctx)
+	if err != nil {
+		ostree.Error = err.Error()
+		status.Errors = append(status.Errors, fmt.Sprintf("ostree: %v", err))
+	}
+	status.Ostree = ostree
+
+	diskPaths := servermasterDiskPaths(configPath, cfg)
+	disks, diskErrors := collectDiskStatuses(diskPaths)
+	status.FreeDiskSpace = disks
+	for _, err := range diskErrors {
+		status.Errors = append(status.Errors, fmt.Sprintf("disk: %v", err))
+	}
+
+	containers, err := collectRunningContainerStatuses(ctx, servermasterLogTail)
+	if err != nil {
+		status.Errors = append(status.Errors, fmt.Sprintf("containers: %v", err))
+	}
+	status.Containers = containers
+
+	for _, container := range containers {
+		if container.Error != "" {
+			status.Errors = append(status.Errors, fmt.Sprintf("container %s: %s", container.Name, container.Error))
+		}
+	}
+
+	if len(status.Errors) > 0 {
+		status.Status = "degraded"
+	}
+
+	return status
+}
+
+func servermasterDiskPaths(configPath string, cfg *Config) []string {
+	paths := []string{"/", "/data"}
+	if configPath != "" {
+		paths = append(paths, filepath.Dir(configPath))
+	}
+	if cfg != nil {
+		paths = append(paths, filepath.Dir(ostreeUploadPath(cfg)))
+	}
+	return paths
+}
+
+func collectDiskStatuses(paths []string) ([]diskStatus, []error) {
+	var statuses []diskStatus
+	var errs []error
+	seen := make(map[string]struct{})
+
+	for _, path := range paths {
+		statPath := nearestExistingPath(path)
+		if statPath == "" {
+			continue
+		}
+		if _, exists := seen[statPath]; exists {
+			continue
+		}
+		seen[statPath] = struct{}{}
+
+		status, err := diskStatusForPath(statPath)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		statuses = append(statuses, status)
+	}
+
+	return statuses, errs
+}
+
+func nearestExistingPath(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return ""
+	}
+
+	candidate := filepath.Clean(path)
+	for {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+		parent := filepath.Dir(candidate)
+		if parent == candidate {
+			return ""
+		}
+		candidate = parent
+	}
+}
+
+func diskStatusForPath(path string) (diskStatus, error) {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(path, &stat); err != nil {
+		return diskStatus{}, fmt.Errorf("%s: %w", path, err)
+	}
+
+	blockSize := uint64(stat.Bsize)
+	total := stat.Blocks * blockSize
+	free := stat.Bfree * blockSize
+	available := stat.Bavail * blockSize
+	used := uint64(0)
+	if total > free {
+		used = total - free
+	}
+
+	usedPercent := 0.0
+	if total > 0 {
+		usedPercent = float64(used) / float64(total) * 100
+	}
+
+	return diskStatus{
+		Path:           path,
+		TotalBytes:     total,
+		FreeBytes:      free,
+		AvailableBytes: available,
+		UsedBytes:      used,
+		UsedPercent:    usedPercent,
+	}, nil
 }
 
 // handleConfigUpload accepts a raw config.json document, validates it, writes
@@ -453,6 +669,194 @@ func ostreeUploadPath(cfg *Config) string {
 		}
 	}
 	return defaultOstreeUploadPath
+}
+
+func collectOstreeStatus(ctx context.Context) (ostreeStatus, error) {
+	var attempts []error
+
+	if output, err := runStatusCommand(ctx, "rpm-ostree", "status", "--json"); err == nil {
+		status, parseErr := parseRPMOstreeStatus(output)
+		if parseErr == nil {
+			return status, nil
+		}
+		attempts = append(attempts, parseErr)
+	} else {
+		attempts = append(attempts, err)
+	}
+
+	if output, err := runStatusCommand(ctx, "bootc", "status", "--json"); err == nil {
+		status, parseErr := parseBootcStatus(output)
+		if parseErr == nil {
+			return status, nil
+		}
+		attempts = append(attempts, parseErr)
+	} else {
+		attempts = append(attempts, err)
+	}
+
+	if output, err := runStatusCommand(ctx, "ostree", "admin", "status"); err == nil {
+		status := parseOstreeAdminStatus(output)
+		if status.Deployment != "" {
+			return status, nil
+		}
+		attempts = append(attempts, fmt.Errorf("ostree admin status did not report a booted deployment"))
+	} else {
+		attempts = append(attempts, err)
+	}
+
+	return ostreeStatus{}, fmt.Errorf("ostree status unavailable: %w", errors.Join(attempts...))
+}
+
+func parseRPMOstreeStatus(raw []byte) (ostreeStatus, error) {
+	var parsed rpmOstreeStatus
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return ostreeStatus{}, fmt.Errorf("parse rpm-ostree status: %w", err)
+	}
+	if len(parsed.Deployments) == 0 {
+		return ostreeStatus{}, fmt.Errorf("rpm-ostree status has no deployments")
+	}
+
+	deployment := parsed.Deployments[0]
+	for _, candidate := range parsed.Deployments {
+		if candidate.Booted {
+			deployment = candidate
+			break
+		}
+	}
+
+	version := deployment.Version
+	if version == "" && deployment.BaseCommitMeta != nil {
+		if value, ok := deployment.BaseCommitMeta["version"].(string); ok {
+			version = value
+		}
+	}
+
+	checksum := deployment.Checksum
+	if checksum == "" {
+		checksum = deployment.BaseCommit
+	}
+	if version == "" {
+		version = imageReferenceVersion(deployment.ContainerImageReference)
+	}
+	if version == "" {
+		version = checksum
+	}
+
+	return ostreeStatus{
+		Source:     "rpm-ostree status --json",
+		Version:    version,
+		Checksum:   checksum,
+		Image:      deployment.ContainerImageReference,
+		Booted:     deployment.Booted,
+		Deployment: deployment.Origin,
+	}, nil
+}
+
+func parseBootcStatus(raw []byte) (ostreeStatus, error) {
+	var root map[string]any
+	if err := json.Unmarshal(raw, &root); err != nil {
+		return ostreeStatus{}, fmt.Errorf("parse bootc status: %w", err)
+	}
+
+	booted := nestedMap(root, "status", "booted")
+	if booted == nil {
+		booted = root
+	}
+
+	status := ostreeStatus{
+		Source: "bootc status --json",
+		Version: firstNestedString(booted,
+			[]string{"image", "version"},
+			[]string{"version"},
+			[]string{"base", "version"},
+		),
+		Checksum: firstNestedString(booted,
+			[]string{"image", "image_digest"},
+			[]string{"image", "digest"},
+			[]string{"checksum"},
+			[]string{"base", "checksum"},
+		),
+		Image: firstNestedString(booted,
+			[]string{"image", "image"},
+			[]string{"image", "reference"},
+			[]string{"image"},
+		),
+		Booted: true,
+	}
+
+	if status.Version == "" && status.Checksum == "" && status.Image == "" {
+		return ostreeStatus{}, fmt.Errorf("bootc status has no booted image/version fields")
+	}
+	if status.Version == "" {
+		status.Version = imageReferenceVersion(status.Image)
+	}
+	if status.Version == "" {
+		status.Version = status.Checksum
+	}
+
+	return status, nil
+}
+
+func parseOstreeAdminStatus(raw []byte) ostreeStatus {
+	for _, line := range strings.Split(string(raw), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "*") {
+			continue
+		}
+		return ostreeStatus{
+			Source:     "ostree admin status",
+			Booted:     true,
+			Deployment: strings.TrimSpace(strings.TrimPrefix(trimmed, "*")),
+		}
+	}
+	return ostreeStatus{Source: "ostree admin status"}
+}
+
+func nestedMap(root map[string]any, keys ...string) map[string]any {
+	current := root
+	for _, key := range keys {
+		next, ok := current[key].(map[string]any)
+		if !ok {
+			return nil
+		}
+		current = next
+	}
+	return current
+}
+
+func firstNestedString(root map[string]any, paths ...[]string) string {
+	for _, path := range paths {
+		if value := nestedString(root, path...); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func nestedString(root map[string]any, keys ...string) string {
+	var current any = root
+	for _, key := range keys {
+		currentMap, ok := current.(map[string]any)
+		if !ok {
+			return ""
+		}
+		current = currentMap[key]
+	}
+
+	switch value := current.(type) {
+	case string:
+		return value
+	case fmt.Stringer:
+		return value.String()
+	default:
+		return ""
+	}
+}
+
+func runStatusCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
+	commandCtx, cancel := context.WithTimeout(ctx, statusCommandTimeout)
+	defer cancel()
+	return runCommandOutput(commandCtx, name, args...)
 }
 
 // scheduleReboot reboots the host after a short grace period so the HTTP
@@ -1122,6 +1526,205 @@ func listContainers(ctx context.Context) ([]listedContainer, error) {
 	return containers, response.Process(&containers)
 }
 
+func inspectContainer(ctx context.Context, nameOrID string) (containerInspectResponse, error) {
+	var inspect containerInspectResponse
+
+	conn, err := bindings.GetClient(ctx)
+	if err != nil {
+		return inspect, err
+	}
+
+	response, err := conn.DoRequest(ctx, nil, http.MethodGet, "/containers/%s/json", nil, nil, nameOrID)
+	if err != nil {
+		return inspect, err
+	}
+	defer func() { _ = response.Body.Close() }()
+
+	return inspect, response.Process(&inspect)
+}
+
+func collectRunningContainerStatuses(ctx context.Context, logTail int) ([]runningContainerStatus, error) {
+	statusCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	statusCtx, err := bindings.NewConnection(statusCtx, "unix:"+podmanSocketPath)
+	if err != nil {
+		return nil, err
+	}
+
+	existing, err := listContainers(statusCtx)
+	if err != nil {
+		return nil, err
+	}
+
+	var running []runningContainerStatus
+	for _, container := range existing {
+		if !containerIsRunning(container.State) {
+			continue
+		}
+
+		status := runningContainerStatus{
+			ID:    container.ID,
+			Name:  containerDisplayName(container),
+			Names: append([]string(nil), container.Names...),
+			State: container.State,
+			Image: container.Image,
+			Logs:  []string{},
+		}
+
+		inspect, err := inspectContainer(statusCtx, container.ID)
+		if err != nil {
+			status.Error = appendStatusError(status.Error, fmt.Sprintf("inspect: %v", err))
+		} else {
+			if inspect.Name != "" {
+				status.Name = strings.TrimPrefix(inspect.Name, "/")
+			}
+			if inspect.ImageName != "" {
+				status.Image = inspect.ImageName
+			}
+			status.ImageID = inspect.Image
+			status.ImageDigest = inspect.ImageDigest
+			status.Version = imageReferenceVersion(status.Image)
+			if status.Version == "" {
+				status.Version = imageReferenceVersion(status.ImageDigest)
+			}
+		}
+
+		logs, err := containerLogLines(statusCtx, container.ID, logTail)
+		if err != nil {
+			status.Error = appendStatusError(status.Error, fmt.Sprintf("logs: %v", err))
+		} else {
+			status.Logs = logs
+		}
+
+		running = append(running, status)
+	}
+
+	return running, nil
+}
+
+func containerIsRunning(state string) bool {
+	return strings.EqualFold(state, "running")
+}
+
+func appendStatusError(existing, next string) string {
+	if existing == "" {
+		return next
+	}
+	return existing + "; " + next
+}
+
+func containerLogLines(ctx context.Context, nameOrID string, tail int) ([]string, error) {
+	conn, err := bindings.GetClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	params := url.Values{}
+	params.Set("stdout", "true")
+	params.Set("stderr", "true")
+	params.Set("tail", strconv.Itoa(tail))
+
+	response, err := conn.DoRequest(ctx, nil, http.MethodGet, "/containers/%s/logs", params, nil, nameOrID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = response.Body.Close() }()
+
+	if !response.IsSuccess() && !response.IsInformational() {
+		return nil, response.Process(nil)
+	}
+
+	var lines []string
+	buffer := make([]byte, 1024)
+	for {
+		fd, length, err := demuxHeader(response.Body, buffer)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return lines, err
+		}
+
+		frame, err := demuxFrame(response.Body, buffer, length)
+		if err != nil {
+			return lines, err
+		}
+
+		stream := "stdout"
+		switch fd {
+		case 1:
+			stream = "stdout"
+		case 2:
+			stream = "stderr"
+		case 3:
+			return lines, fmt.Errorf("podman log stream error: %s", strings.TrimSpace(string(frame)))
+		}
+
+		for _, line := range splitLogFrame(string(frame)) {
+			lines = append(lines, stream+": "+line)
+		}
+	}
+
+	if len(lines) > tail {
+		lines = lines[len(lines)-tail:]
+	}
+
+	return lines, nil
+}
+
+func demuxHeader(r io.Reader, buffer []byte) (int, int, error) {
+	if len(buffer) < 8 {
+		buffer = make([]byte, 8)
+	}
+	if _, err := io.ReadFull(r, buffer[0:8]); err != nil {
+		return 0, 0, err
+	}
+
+	fd := int(buffer[0])
+	if fd < 0 || fd > 3 {
+		return 0, 0, fmt.Errorf("container log stream lost sync: channel %d", fd)
+	}
+
+	return fd, int(binary.BigEndian.Uint32(buffer[4:8])), nil
+}
+
+func demuxFrame(r io.Reader, buffer []byte, length int) ([]byte, error) {
+	if len(buffer) < length {
+		buffer = make([]byte, length)
+	}
+	if _, err := io.ReadFull(r, buffer[0:length]); err != nil {
+		return nil, err
+	}
+	return buffer[0:length], nil
+}
+
+func splitLogFrame(frame string) []string {
+	frame = strings.TrimSuffix(frame, "\n")
+	if frame == "" {
+		return nil
+	}
+	return strings.Split(frame, "\n")
+}
+
+func imageReferenceVersion(ref string) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return ""
+	}
+
+	name, digest, hasDigest := strings.Cut(ref, "@")
+	lastSlash := strings.LastIndex(name, "/")
+	lastColon := strings.LastIndex(name, ":")
+	if lastColon > lastSlash {
+		return name[lastColon+1:]
+	}
+	if hasDigest {
+		return digest
+	}
+	return ""
+}
+
 func containerIsConfigured(container listedContainer, configuredNames map[string]struct{}) bool {
 	for _, name := range container.Names {
 		if _, exists := configuredNames[name]; exists {
@@ -1458,4 +2061,25 @@ func runCommand(name string, args ...string) error {
 	}
 
 	return fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, message)
+}
+
+func runCommandOutput(ctx context.Context, name string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		return output, nil
+	}
+
+	message := strings.TrimSpace(string(output))
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		if message == "" {
+			return output, fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), ctxErr)
+		}
+		return output, fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), ctxErr, message)
+	}
+	if message == "" {
+		return output, fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
+	}
+
+	return output, fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, message)
 }

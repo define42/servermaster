@@ -1,6 +1,6 @@
-# servermastef
+# servermaster
 
-`servermastef` is a small Podman container reconciler written in Go.
+`servermaster` is a small Podman container reconciler written in Go.
 It starts a small web server on port `8080`, reads a JSON config file, ensures each declared container is recreated with the desired settings, and starts everything through the Podman API socket.
 
 ## How it works

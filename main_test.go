@@ -336,7 +336,7 @@ func TestEnsureFiles(t *testing.T) {
 	}
 
 	// Parent directories are created, content is written, and mode is exact.
-	got, err := os.ReadFile(plainPath)
+	got, err := os.ReadFile(plainPath) //nolint:gosec // reads a temp-dir fixture the test just wrote.
 	if err != nil {
 		t.Fatalf("read written file: %v", err)
 	}
@@ -351,7 +351,7 @@ func TestEnsureFiles(t *testing.T) {
 		t.Fatalf("mode = %o, want 640", info.Mode().Perm())
 	}
 
-	raw, err := os.ReadFile(filepath.Join(dir, "raw"))
+	raw, err := os.ReadFile(filepath.Join(dir, "raw")) //nolint:gosec // reads a temp-dir fixture the test just wrote.
 	if err != nil {
 		t.Fatalf("read base64 file: %v", err)
 	}
@@ -364,7 +364,7 @@ func TestEnsureFiles(t *testing.T) {
 	if err := ensureFiles(files[:1]); err != nil {
 		t.Fatalf("ensureFiles rewrite: %v", err)
 	}
-	if got, _ := os.ReadFile(plainPath); string(got) != "changed\n" {
+	if got, _ := os.ReadFile(plainPath); string(got) != "changed\n" { //nolint:gosec // reads a temp-dir fixture the test just wrote.
 		t.Fatalf("rewrite content = %q, want %q", got, "changed\n")
 	}
 
@@ -408,49 +408,76 @@ func TestParseInterfaceAddress(t *testing.T) {
 	}
 }
 
-func TestBuildNMState(t *testing.T) {
-	t.Run("static ipv4 with gateway and dns", func(t *testing.T) {
-		state, err := buildNMState([]InterfaceConfig{{
-			Name:      "eth0",
-			IPAddress: "192.168.1.10",
-			Subnet:    "192.168.1.0/24",
-			Gateway:   "192.168.1.1",
-			DNS:       []string{"1.1.1.1", "8.8.8.8"},
-		}})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
+// nmStateErrorCase is an interface config buildNMState is expected to reject.
+type nmStateErrorCase struct {
+	name  string
+	iface InterfaceConfig
+}
 
-		if len(state.Interfaces) != 1 {
-			t.Fatalf("interfaces = %d, want 1", len(state.Interfaces))
-		}
-		iface := state.Interfaces[0]
-		if iface.Name != "eth0" || iface.Type != "ethernet" || iface.State != "up" {
-			t.Fatalf("interface metadata mismatch: %+v", iface)
-		}
-		if iface.IPv6 != nil {
-			t.Fatalf("ipv4 address should not populate ipv6 stack: %+v", iface.IPv6)
-		}
-		if iface.IPv4 == nil || !iface.IPv4.Enabled || iface.IPv4.DHCP {
-			t.Fatalf("ipv4 stack mismatch: %+v", iface.IPv4)
-		}
-		if got := iface.IPv4.Addresses[0]; got.IP != "192.168.1.10" || got.PrefixLength != 24 {
-			t.Fatalf("address = %+v, want 192.168.1.10/24", got)
-		}
+// assertBuildNMStateErrors runs each case as a subtest asserting buildNMState
+// returns an error for the given interface.
+func assertBuildNMStateErrors(t *testing.T, cases []nmStateErrorCase) {
+	t.Helper()
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := buildNMState([]InterfaceConfig{tt.iface}); err == nil {
+				t.Fatalf("buildNMState(%+v) expected error, got nil", tt.iface)
+			}
+		})
+	}
+}
 
-		if state.Routes == nil || len(state.Routes.Config) != 1 {
-			t.Fatalf("routes = %+v, want one default route", state.Routes)
-		}
-		route := state.Routes.Config[0]
-		if route.Destination != "0.0.0.0/0" || route.NextHopAddress != "192.168.1.1" || route.NextHopInterface != "eth0" {
-			t.Fatalf("route mismatch: %+v", route)
-		}
+func TestBuildNMStateStaticIPv4(t *testing.T) {
+	state, err := buildNMState([]InterfaceConfig{{
+		Name:      "eth0",
+		IPAddress: "192.168.1.10",
+		Subnet:    "192.168.1.0/24",
+		Gateway:   "192.168.1.1",
+		DNS:       []string{"1.1.1.1", "8.8.8.8"},
+	}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
-		if state.DNSResolver == nil || !reflect.DeepEqual(state.DNSResolver.Config.Server, []string{"1.1.1.1", "8.8.8.8"}) {
-			t.Fatalf("dns = %+v, want [1.1.1.1 8.8.8.8]", state.DNSResolver)
-		}
-	})
+	if len(state.Interfaces) != 1 {
+		t.Fatalf("interfaces = %d, want 1", len(state.Interfaces))
+	}
+	assertStaticIPv4Interface(t, state.Interfaces[0])
 
+	if state.Routes == nil || len(state.Routes.Config) != 1 {
+		t.Fatalf("routes = %+v, want one default route", state.Routes)
+	}
+	assertStaticIPv4Route(t, state.Routes.Config[0])
+
+	if state.DNSResolver == nil || !reflect.DeepEqual(state.DNSResolver.Config.Server, []string{"1.1.1.1", "8.8.8.8"}) {
+		t.Fatalf("dns = %+v, want [1.1.1.1 8.8.8.8]", state.DNSResolver)
+	}
+}
+
+func assertStaticIPv4Interface(t *testing.T, iface nmInterface) {
+	t.Helper()
+	if iface.Name != "eth0" || iface.Type != "ethernet" || iface.State != "up" {
+		t.Fatalf("interface metadata mismatch: %+v", iface)
+	}
+	if iface.IPv6 != nil {
+		t.Fatalf("ipv4 address should not populate ipv6 stack: %+v", iface.IPv6)
+	}
+	if iface.IPv4 == nil || !iface.IPv4.Enabled || iface.IPv4.DHCP {
+		t.Fatalf("ipv4 stack mismatch: %+v", iface.IPv4)
+	}
+	if got := iface.IPv4.Addresses[0]; got.IP != "192.168.1.10" || got.PrefixLength != 24 {
+		t.Fatalf("address = %+v, want 192.168.1.10/24", got)
+	}
+}
+
+func assertStaticIPv4Route(t *testing.T, route nmRoute) {
+	t.Helper()
+	if route.Destination != "0.0.0.0/0" || route.NextHopAddress != "192.168.1.1" || route.NextHopInterface != "eth0" {
+		t.Fatalf("route mismatch: %+v", route)
+	}
+}
+
+func TestBuildNMStateInterfaceType(t *testing.T) {
 	t.Run("explicit type is passed through", func(t *testing.T) {
 		state, err := buildNMState([]InterfaceConfig{{
 			Name:      "dummy0",
@@ -475,97 +502,81 @@ func TestBuildNMState(t *testing.T) {
 			t.Fatalf("type = %q, want ethernet", state.Interfaces[0].Type)
 		}
 	})
+}
 
-	t.Run("vlan interface", func(t *testing.T) {
-		state, err := buildNMState([]InterfaceConfig{{
-			Name:      "eth0.100",
-			Type:      "vlan",
-			IPAddress: "192.168.100.10",
-			Subnet:    "192.168.100.0/24",
-			VLAN:      &VLANConfig{BaseInterface: "eth0", ID: 100},
-		}})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		iface := state.Interfaces[0]
-		if iface.Type != "vlan" || iface.VLAN == nil {
-			t.Fatalf("vlan interface mismatch: %+v", iface)
-		}
-		if iface.VLAN.BaseIface != "eth0" || iface.VLAN.ID != 100 {
-			t.Fatalf("vlan settings = %+v, want base eth0 id 100", iface.VLAN)
-		}
-		if iface.IPv4 == nil || iface.IPv4.Addresses[0].IP != "192.168.100.10" {
-			t.Fatalf("vlan ipv4 mismatch: %+v", iface.IPv4)
-		}
-	})
+func TestBuildNMStateVLAN(t *testing.T) {
+	state, err := buildNMState([]InterfaceConfig{{
+		Name:      "eth0.100",
+		Type:      "vlan",
+		IPAddress: "192.168.100.10",
+		Subnet:    "192.168.100.0/24",
+		VLAN:      &VLANConfig{BaseInterface: "eth0", ID: 100},
+	}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	iface := state.Interfaces[0]
+	if iface.Type != "vlan" || iface.VLAN == nil {
+		t.Fatalf("vlan interface mismatch: %+v", iface)
+	}
+	if iface.VLAN.BaseIface != "eth0" || iface.VLAN.ID != 100 {
+		t.Fatalf("vlan settings = %+v, want base eth0 id 100", iface.VLAN)
+	}
+	if iface.IPv4 == nil || iface.IPv4.Addresses[0].IP != "192.168.100.10" {
+		t.Fatalf("vlan ipv4 mismatch: %+v", iface.IPv4)
+	}
+}
 
-	vlanErrors := []struct {
-		name  string
-		iface InterfaceConfig
-	}{
+func TestBuildNMStateVLANErrors(t *testing.T) {
+	assertBuildNMStateErrors(t, []nmStateErrorCase{
 		{"vlan type without settings", InterfaceConfig{Name: "eth0.100", Type: "vlan"}},
 		{"vlan missing base", InterfaceConfig{Name: "eth0.100", Type: "vlan", VLAN: &VLANConfig{ID: 100}}},
 		{"vlan id too low", InterfaceConfig{Name: "eth0.0", Type: "vlan", VLAN: &VLANConfig{BaseInterface: "eth0", ID: 0}}},
 		{"vlan id too high", InterfaceConfig{Name: "eth0.x", Type: "vlan", VLAN: &VLANConfig{BaseInterface: "eth0", ID: 4095}}},
 		{"vlan settings on non-vlan type", InterfaceConfig{Name: "eth0", Type: "ethernet", VLAN: &VLANConfig{BaseInterface: "eth0", ID: 100}}},
-	}
-	for _, tt := range vlanErrors {
-		t.Run(tt.name, func(t *testing.T) {
-			if _, err := buildNMState([]InterfaceConfig{tt.iface}); err == nil {
-				t.Fatalf("buildNMState(%+v) expected error, got nil", tt.iface)
-			}
-		})
-	}
-
-	t.Run("ipv6 gateway yields default v6 route", func(t *testing.T) {
-		state, err := buildNMState([]InterfaceConfig{{
-			Name:      "eth0",
-			IPAddress: "2001:db8::10",
-			Subnet:    "2001:db8::/64",
-			Gateway:   "2001:db8::1",
-		}})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if state.Interfaces[0].IPv4 != nil || state.Interfaces[0].IPv6 == nil {
-			t.Fatalf("ipv6 address should populate ipv6 stack only: %+v", state.Interfaces[0])
-		}
-		if got := state.Routes.Config[0].Destination; got != "::/0" {
-			t.Fatalf("route destination = %q, want ::/0", got)
-		}
 	})
+}
 
-	t.Run("dns merged and de-duplicated across interfaces", func(t *testing.T) {
-		state, err := buildNMState([]InterfaceConfig{
-			{Name: "eth0", DNS: []string{"1.1.1.1", "8.8.8.8"}},
-			{Name: "eth1", DNS: []string{"8.8.8.8", "9.9.9.9"}},
-		})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if !reflect.DeepEqual(state.DNSResolver.Config.Server, []string{"1.1.1.1", "8.8.8.8", "9.9.9.9"}) {
-			t.Fatalf("dns = %v, want deduped [1.1.1.1 8.8.8.8 9.9.9.9]", state.DNSResolver.Config.Server)
-		}
+func TestBuildNMStateIPv6Gateway(t *testing.T) {
+	state, err := buildNMState([]InterfaceConfig{{
+		Name:      "eth0",
+		IPAddress: "2001:db8::10",
+		Subnet:    "2001:db8::/64",
+		Gateway:   "2001:db8::1",
+	}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if state.Interfaces[0].IPv4 != nil || state.Interfaces[0].IPv6 == nil {
+		t.Fatalf("ipv6 address should populate ipv6 stack only: %+v", state.Interfaces[0])
+	}
+	if got := state.Routes.Config[0].Destination; got != "::/0" {
+		t.Fatalf("route destination = %q, want ::/0", got)
+	}
+}
+
+func TestBuildNMStateDNSMerge(t *testing.T) {
+	state, err := buildNMState([]InterfaceConfig{
+		{Name: "eth0", DNS: []string{"1.1.1.1", "8.8.8.8"}},
+		{Name: "eth1", DNS: []string{"8.8.8.8", "9.9.9.9"}},
 	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !reflect.DeepEqual(state.DNSResolver.Config.Server, []string{"1.1.1.1", "8.8.8.8", "9.9.9.9"}) {
+		t.Fatalf("dns = %v, want deduped [1.1.1.1 8.8.8.8 9.9.9.9]", state.DNSResolver.Config.Server)
+	}
+}
 
-	errorCases := []struct {
-		name  string
-		iface InterfaceConfig
-	}{
+func TestBuildNMStateErrors(t *testing.T) {
+	assertBuildNMStateErrors(t, []nmStateErrorCase{
 		{"missing name", InterfaceConfig{IPAddress: "10.0.0.1", Subnet: "10.0.0.0/24"}},
 		{"ip without subnet", InterfaceConfig{Name: "eth0", IPAddress: "10.0.0.1"}},
 		{"subnet without ip", InterfaceConfig{Name: "eth0", Subnet: "10.0.0.0/24"}},
 		{"address outside subnet", InterfaceConfig{Name: "eth0", IPAddress: "10.1.0.1", Subnet: "10.0.0.0/24"}},
 		{"bad gateway", InterfaceConfig{Name: "eth0", Gateway: "not-an-ip"}},
 		{"bad dns", InterfaceConfig{Name: "eth0", DNS: []string{"not-an-ip"}}},
-	}
-	for _, tt := range errorCases {
-		t.Run(tt.name, func(t *testing.T) {
-			if _, err := buildNMState([]InterfaceConfig{tt.iface}); err == nil {
-				t.Fatalf("buildNMState(%+v) expected error, got nil", tt.iface)
-			}
-		})
-	}
+	})
 }
 
 // device builds a fake netlink link for tests. netlink.Device.Type() reports
@@ -611,15 +622,9 @@ func stubNetlink(links []netlink.Link, addrs map[int][]netlink.Addr, routes []ne
 	}
 }
 
-func TestCollectNetworkStatus(t *testing.T) {
-	resolv := filepath.Join(t.TempDir(), "resolv.conf")
-	if err := os.WriteFile(resolv, []byte("# comment\nnameserver 1.1.1.1\nnameserver 8.8.8.8\nsearch example.com\n"), 0o644); err != nil {
-		t.Fatalf("write resolv.conf: %v", err)
-	}
-	prevResolv := resolvConfPath
-	resolvConfPath = resolv
-	defer func() { resolvConfPath = prevResolv }()
-
+// testNetworkLinks returns the eth0/lo fixture links and addresses shared by the
+// network-status tests.
+func testNetworkLinks() ([]netlink.Link, map[int][]netlink.Addr) {
 	links := []netlink.Link{
 		device(2, "eth0", "52:54:00:12:34:56", 1500, netlink.OperUp, net.FlagUp|net.FlagBroadcast),
 		device(1, "lo", "", 65536, netlink.OperUnknown, net.FlagUp|net.FlagLoopback),
@@ -630,6 +635,19 @@ func TestCollectNetworkStatus(t *testing.T) {
 			{IPNet: cidr("fe80::1/64")},
 		},
 	}
+	return links, addrs
+}
+
+func TestCollectNetworkStatus(t *testing.T) {
+	resolv := filepath.Join(t.TempDir(), "resolv.conf")
+	if err := os.WriteFile(resolv, []byte("# comment\nnameserver 1.1.1.1\nnameserver 8.8.8.8\nsearch example.com\n"), 0o600); err != nil {
+		t.Fatalf("write resolv.conf: %v", err)
+	}
+	prevResolv := resolvConfPath
+	resolvConfPath = resolv
+	defer func() { resolvConfPath = prevResolv }()
+
+	links, addrs := testNetworkLinks()
 	routes := []netlink.Route{
 		{LinkIndex: 2, Gw: net.ParseIP("192.168.1.1"), Family: netlink.FAMILY_V4},
 		{LinkIndex: 2, Dst: cidr("192.168.1.0/24"), Family: netlink.FAMILY_V4},
@@ -644,11 +662,20 @@ func TestCollectNetworkStatus(t *testing.T) {
 	if status.Source != "netlink" {
 		t.Fatalf("source = %q, want netlink", status.Source)
 	}
-	if len(status.Interfaces) != 2 {
-		t.Fatalf("interfaces = %d, want 2", len(status.Interfaces))
+	assertNetworkInterfaces(t, status.Interfaces)
+	assertNetworkRoutes(t, status.Routes)
+	if !reflect.DeepEqual(status.DNS, []string{"1.1.1.1", "8.8.8.8"}) {
+		t.Fatalf("dns = %v, want [1.1.1.1 8.8.8.8]", status.DNS)
+	}
+}
+
+func assertNetworkInterfaces(t *testing.T, interfaces []networkInterface) {
+	t.Helper()
+	if len(interfaces) != 2 {
+		t.Fatalf("interfaces = %d, want 2", len(interfaces))
 	}
 
-	eth0 := status.Interfaces[0]
+	eth0 := interfaces[0]
 	if eth0.Name != "eth0" || eth0.Index != 2 || eth0.Type != "device" || eth0.State != "up" {
 		t.Fatalf("eth0 metadata mismatch: %+v", eth0)
 	}
@@ -665,47 +692,47 @@ func TestCollectNetworkStatus(t *testing.T) {
 		t.Fatalf("eth0 ipv6 address mismatch: %+v", eth0.Addresses[1])
 	}
 
-	lo := status.Interfaces[1]
+	lo := interfaces[1]
 	if lo.Name != "lo" || len(lo.Addresses) != 0 || lo.MAC != "" {
 		t.Fatalf("lo should have no addresses or mac: %+v", lo)
 	}
+}
 
-	if len(status.Routes) != 2 {
-		t.Fatalf("routes = %d, want 2", len(status.Routes))
+func assertNetworkRoutes(t *testing.T, routes []networkRoute) {
+	t.Helper()
+	if len(routes) != 2 {
+		t.Fatalf("routes = %d, want 2", len(routes))
 	}
-	if status.Routes[0] != (networkRoute{Destination: "0.0.0.0/0", Gateway: "192.168.1.1", Interface: "eth0", Family: "ipv4"}) {
-		t.Fatalf("default route mismatch: %+v", status.Routes[0])
+	if routes[0] != (networkRoute{Destination: "0.0.0.0/0", Gateway: "192.168.1.1", Interface: "eth0", Family: "ipv4"}) {
+		t.Fatalf("default route mismatch: %+v", routes[0])
 	}
-	if status.Routes[1].Destination != "192.168.1.0/24" || status.Routes[1].Interface != "eth0" {
-		t.Fatalf("subnet route mismatch: %+v", status.Routes[1])
+	if routes[1].Destination != "192.168.1.0/24" || routes[1].Interface != "eth0" {
+		t.Fatalf("subnet route mismatch: %+v", routes[1])
 	}
+}
 
-	if !reflect.DeepEqual(status.DNS, []string{"1.1.1.1", "8.8.8.8"}) {
-		t.Fatalf("dns = %v, want [1.1.1.1 8.8.8.8]", status.DNS)
+func TestCollectNetworkStatusLinkListingFailure(t *testing.T) {
+	prev := netlinkLinkList
+	netlinkLinkList = func() ([]netlink.Link, error) { return nil, fmt.Errorf("boom") }
+	defer func() { netlinkLinkList = prev }()
+
+	status := collectNetworkStatus(context.Background())
+	if status.Error == "" || !strings.Contains(status.Error, "boom") {
+		t.Fatalf("expected link listing error, got %+v", status)
 	}
+}
 
-	t.Run("link listing failure is reported", func(t *testing.T) {
-		prev := netlinkLinkList
-		netlinkLinkList = func() ([]netlink.Link, error) { return nil, fmt.Errorf("boom") }
-		defer func() { netlinkLinkList = prev }()
+func TestCollectNetworkStatusRouteListingFailure(t *testing.T) {
+	links, addrs := testNetworkLinks()
+	defer stubNetlink(links, addrs, nil, fmt.Errorf("route boom"))()
 
-		status := collectNetworkStatus(context.Background())
-		if status.Error == "" || !strings.Contains(status.Error, "boom") {
-			t.Fatalf("expected link listing error, got %+v", status)
-		}
-	})
-
-	t.Run("route listing failure is recorded but interfaces still returned", func(t *testing.T) {
-		defer stubNetlink(links, addrs, nil, fmt.Errorf("route boom"))()
-
-		status := collectNetworkStatus(context.Background())
-		if len(status.Interfaces) != 2 {
-			t.Fatalf("interfaces = %d, want 2 despite route error", len(status.Interfaces))
-		}
-		if !strings.Contains(status.Error, "route boom") {
-			t.Fatalf("expected route error recorded, got %q", status.Error)
-		}
-	})
+	status := collectNetworkStatus(context.Background())
+	if len(status.Interfaces) != 2 {
+		t.Fatalf("interfaces = %d, want 2 despite route error", len(status.Interfaces))
+	}
+	if !strings.Contains(status.Error, "route boom") {
+		t.Fatalf("expected route error recorded, got %q", status.Error)
+	}
 }
 
 func TestResolvConfNameservers(t *testing.T) {
@@ -714,7 +741,7 @@ func TestResolvConfNameservers(t *testing.T) {
 	}
 
 	path := filepath.Join(t.TempDir(), "resolv.conf")
-	if err := os.WriteFile(path, []byte("nameserver 9.9.9.9\n; comment\noptions edns0\nnameserver 2606:4700:4700::1111\n"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("nameserver 9.9.9.9\n; comment\noptions edns0\nnameserver 2606:4700:4700::1111\n"), 0o600); err != nil {
 		t.Fatalf("write resolv.conf: %v", err)
 	}
 	if got := resolvConfNameservers(path); !reflect.DeepEqual(got, []string{"9.9.9.9", "2606:4700:4700::1111"}) {
@@ -927,7 +954,32 @@ func TestContainerUpToDate(t *testing.T) {
 	}
 }
 
-func TestValidateConfig(t *testing.T) {
+// validateConfigCase is a config expected to fail validation, with want naming
+// a substring the returned error must contain.
+type validateConfigCase struct {
+	name string
+	cfg  *Config
+	want string
+}
+
+// assertValidateConfigErrors runs each case as a subtest asserting validateConfig
+// fails with an error containing want.
+func assertValidateConfigErrors(t *testing.T, cases []validateConfigCase) {
+	t.Helper()
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateConfig(tt.cfg)
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tt.want)
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %q, want it to contain %q", err.Error(), tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateConfigValid(t *testing.T) {
 	t.Run("valid", func(t *testing.T) {
 		cfg := &Config{
 			PodmanMode:    "rootful",
@@ -946,109 +998,52 @@ func TestValidateConfig(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
+}
 
-	errorCases := []struct {
-		name string
-		cfg  *Config
-		want string
-	}{
-		{
-			name: "rootless podman mode rejected",
-			cfg:  &Config{PodmanMode: "rootless"},
-			want: "podman_mode",
-		},
+func TestValidateConfigPodmanAndContainerErrors(t *testing.T) {
+	assertValidateConfigErrors(t, []validateConfigCase{
+		{name: "rootless podman mode rejected", cfg: &Config{PodmanMode: "rootless"}, want: "podman_mode"},
 		{
 			name: "container declares interfaces",
-			cfg: &Config{Containers: []ContainerConfig{
-				{Name: "web", Image: "nginx", Interfaces: []InterfaceConfig{{Name: "eth0"}}},
-			}},
+			cfg:  &Config{Containers: []ContainerConfig{{Name: "web", Image: "nginx", Interfaces: []InterfaceConfig{{Name: "eth0"}}}}},
 			want: "interfaces",
 		},
 		{
 			name: "bad host port",
-			cfg: &Config{Containers: []ContainerConfig{
-				{Name: "web", Image: "nginx", Ports: []PortConfig{{HostPort: 70000, ContainerPort: 80}}},
-			}},
+			cfg:  &Config{Containers: []ContainerConfig{{Name: "web", Image: "nginx", Ports: []PortConfig{{HostPort: 70000, ContainerPort: 80}}}}},
 			want: "host_port",
 		},
 		{
 			name: "bad container port",
-			cfg: &Config{Containers: []ContainerConfig{
-				{Name: "web", Image: "nginx", Ports: []PortConfig{{HostPort: 80, ContainerPort: 0}}},
-			}},
+			cfg:  &Config{Containers: []ContainerConfig{{Name: "web", Image: "nginx", Ports: []PortConfig{{HostPort: 80, ContainerPort: 0}}}}},
 			want: "container_port",
 		},
 		{
-			name: "bad firewall port",
-			cfg:  &Config{FirewallPorts: []FirewallPortConfig{{Port: "70000"}}},
-			want: "firewall port",
-		},
-		{
-			name: "bad firewall protocol",
-			cfg:  &Config{FirewallPorts: []FirewallPortConfig{{Port: "8080", Protocol: "icmp"}}},
-			want: "protocol",
-		},
-		{
 			name: "bad selinux relabel",
-			cfg: &Config{Containers: []ContainerConfig{
-				{Name: "web", Image: "nginx", Volumes: []VolumeConfig{{HostPath: "/data", ContainerPath: "/data", SELinux: "x"}}},
-			}},
+			cfg:  &Config{Containers: []ContainerConfig{{Name: "web", Image: "nginx", Volumes: []VolumeConfig{{HostPath: "/data", ContainerPath: "/data", SELinux: "x"}}}}},
 			want: "selinux",
 		},
-		{
-			name: "folder missing path",
-			cfg:  &Config{Folders: []FolderConfig{{Chmod: "0755"}}},
-			want: "missing path",
-		},
-		{
-			name: "folder bad chmod",
-			cfg:  &Config{Folders: []FolderConfig{{Path: "/data", Chmod: "99999"}}},
-			want: "chmod",
-		},
-		{
-			name: "file missing path",
-			cfg:  &Config{Files: []FileConfig{{Content: "hi"}}},
-			want: "missing path",
-		},
-		{
-			name: "file bad chmod",
-			cfg:  &Config{Files: []FileConfig{{Path: "/data/x", Chmod: "99999"}}},
-			want: "chmod",
-		},
-		{
-			name: "file bad encoding",
-			cfg:  &Config{Files: []FileConfig{{Path: "/data/x", Encoding: "rot13"}}},
-			want: "encoding",
-		},
-		{
-			name: "file bad base64",
-			cfg:  &Config{Files: []FileConfig{{Path: "/data/x", Encoding: "base64", Content: "not!base64"}}},
-			want: "base64",
-		},
-		{
-			name: "interface bad gateway",
-			cfg:  &Config{Interfaces: []InterfaceConfig{{Name: "eth0", Gateway: "not-an-ip"}}},
-			want: "gateway",
-		},
-	}
+	})
+}
 
-	for _, tt := range errorCases {
-		t.Run(tt.name, func(t *testing.T) {
-			err := validateConfig(tt.cfg)
-			if err == nil {
-				t.Fatalf("expected error containing %q, got nil", tt.want)
-			}
-			if !strings.Contains(err.Error(), tt.want) {
-				t.Fatalf("error = %q, want it to contain %q", err.Error(), tt.want)
-			}
-		})
-	}
+func TestValidateConfigResourceErrors(t *testing.T) {
+	assertValidateConfigErrors(t, []validateConfigCase{
+		{name: "bad firewall port", cfg: &Config{FirewallPorts: []FirewallPortConfig{{Port: "70000"}}}, want: "firewall port"},
+		{name: "bad firewall protocol", cfg: &Config{FirewallPorts: []FirewallPortConfig{{Port: "8080", Protocol: "icmp"}}}, want: "protocol"},
+		{name: "folder missing path", cfg: &Config{Folders: []FolderConfig{{Chmod: "0755"}}}, want: "missing path"},
+		{name: "folder bad chmod", cfg: &Config{Folders: []FolderConfig{{Path: "/data", Chmod: "99999"}}}, want: "chmod"},
+		{name: "file missing path", cfg: &Config{Files: []FileConfig{{Content: "hi"}}}, want: "missing path"},
+		{name: "file bad chmod", cfg: &Config{Files: []FileConfig{{Path: "/data/x", Chmod: "99999"}}}, want: "chmod"},
+		{name: "file bad encoding", cfg: &Config{Files: []FileConfig{{Path: "/data/x", Encoding: "rot13"}}}, want: "encoding"},
+		{name: "file bad base64", cfg: &Config{Files: []FileConfig{{Path: "/data/x", Encoding: "base64", Content: "not!base64"}}}, want: "base64"},
+		{name: "interface bad gateway", cfg: &Config{Interfaces: []InterfaceConfig{{Name: "eth0", Gateway: "not-an-ip"}}}, want: "gateway"},
+	})
 }
 
 func writeTempConfig(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 	return path
@@ -1068,79 +1063,83 @@ func stubServermasterStatusCollector(fn func(context.Context, string) servermast
 	return func() { servermasterStatusCollector = prev }
 }
 
-func TestHandleServermasterStatus(t *testing.T) {
-	t.Run("method not allowed", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/servermaster", nil)
-		rec := httptest.NewRecorder()
-		handleServermasterStatus(rec, req, "unused")
-		if rec.Code != http.StatusMethodNotAllowed {
-			t.Fatalf("status = %d, want 405", rec.Code)
-		}
-	})
+func TestHandleServermasterStatusMethodNotAllowed(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/servermaster", nil)
+	rec := httptest.NewRecorder()
+	handleServermasterStatus(rec, req, "unused")
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", rec.Code)
+	}
+}
 
-	t.Run("pretty json status", func(t *testing.T) {
-		defer stubServermasterStatusCollector(func(context.Context, string) servermasterStatus {
-			return servermasterStatus{
-				Status:      "ok",
-				GeneratedAt: "2026-05-24T12:00:00Z",
-				Ostree:      ostreeStatus{Source: "test", Version: "1.2.3", Booted: true},
-				FreeDiskSpace: []diskStatus{{
-					Path:           "/",
-					TotalBytes:     100,
-					FreeBytes:      40,
-					AvailableBytes: 30,
-					UsedBytes:      60,
-					UsedPercent:    60,
-				}},
-				Network: networkStatus{
-					Source: "netlink",
-					Interfaces: []networkInterface{{
-						Name:      "eth0",
-						Index:     2,
-						Type:      "device",
-						State:     "up",
-						Addresses: []networkAddress{{IP: "192.168.1.10", PrefixLength: 24, Family: "ipv4"}},
-					}},
-					DNS: []string{"1.1.1.1"},
-				},
-				Containers: []runningContainerStatus{{
-					ID:      "abc123",
-					Name:    "web",
-					State:   "running",
-					Image:   "docker.io/library/nginx:1.25",
-					Version: "1.25",
-					Logs:    []string{"stdout: ready"},
-				}},
-			}
-		})()
+// sampleServermasterStatus is a fully populated status document used to exercise
+// the /servermaster handler's encoding.
+func sampleServermasterStatus() servermasterStatus {
+	return servermasterStatus{
+		Status:      "ok",
+		GeneratedAt: "2026-05-24T12:00:00Z",
+		Ostree:      ostreeStatus{Source: "test", Version: "1.2.3", Booted: true},
+		FreeDiskSpace: []diskStatus{{
+			Path:           "/",
+			TotalBytes:     100,
+			FreeBytes:      40,
+			AvailableBytes: 30,
+			UsedBytes:      60,
+			UsedPercent:    60,
+		}},
+		Network: networkStatus{
+			Source: "netlink",
+			Interfaces: []networkInterface{{
+				Name:      "eth0",
+				Index:     2,
+				Type:      "device",
+				State:     "up",
+				Addresses: []networkAddress{{IP: "192.168.1.10", PrefixLength: 24, Family: "ipv4"}},
+			}},
+			DNS: []string{"1.1.1.1"},
+		},
+		Containers: []runningContainerStatus{{
+			ID:      "abc123",
+			Name:    "web",
+			State:   "running",
+			Image:   "docker.io/library/nginx:1.25",
+			Version: "1.25",
+			Logs:    []string{"stdout: ready"},
+		}},
+	}
+}
 
-		req := httptest.NewRequest(http.MethodGet, "/servermaster", nil)
-		rec := httptest.NewRecorder()
-		handleServermasterStatus(rec, req, "unused")
-		if rec.Code != http.StatusOK {
-			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-		}
-		if contentType := rec.Header().Get("Content-Type"); !strings.Contains(contentType, "application/json") {
-			t.Fatalf("Content-Type = %q, want application/json", contentType)
-		}
-		if !strings.HasPrefix(rec.Body.String(), "{\n  ") {
-			t.Fatalf("response is not pretty-printed JSON: %q", rec.Body.String())
-		}
+func TestHandleServermasterStatusPrettyJSON(t *testing.T) {
+	defer stubServermasterStatusCollector(func(context.Context, string) servermasterStatus {
+		return sampleServermasterStatus()
+	})()
 
-		var got servermasterStatus
-		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-			t.Fatalf("unmarshal status: %v", err)
-		}
-		if got.Status != "ok" || got.Ostree.Version != "1.2.3" || len(got.Containers) != 1 {
-			t.Fatalf("unexpected status document: %+v", got)
-		}
-		if len(got.Network.Interfaces) != 1 || got.Network.Interfaces[0].Name != "eth0" {
-			t.Fatalf("unexpected network document: %+v", got.Network)
-		}
-		if got.Containers[0].Logs[0] != "stdout: ready" {
-			t.Fatalf("logs = %v, want stdout line", got.Containers[0].Logs)
-		}
-	})
+	req := httptest.NewRequest(http.MethodGet, "/servermaster", nil)
+	rec := httptest.NewRecorder()
+	handleServermasterStatus(rec, req, "unused")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if contentType := rec.Header().Get("Content-Type"); !strings.Contains(contentType, "application/json") {
+		t.Fatalf("Content-Type = %q, want application/json", contentType)
+	}
+	if !strings.HasPrefix(rec.Body.String(), "{\n  ") {
+		t.Fatalf("response is not pretty-printed JSON: %q", rec.Body.String())
+	}
+
+	var got servermasterStatus
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal status: %v", err)
+	}
+	if got.Status != "ok" || got.Ostree.Version != "1.2.3" || len(got.Containers) != 1 {
+		t.Fatalf("unexpected status document: %+v", got)
+	}
+	if len(got.Network.Interfaces) != 1 || got.Network.Interfaces[0].Name != "eth0" {
+		t.Fatalf("unexpected network document: %+v", got.Network)
+	}
+	if got.Containers[0].Logs[0] != "stdout: ready" {
+		t.Fatalf("logs = %v, want stdout line", got.Containers[0].Logs)
+	}
 }
 
 func TestImageReferenceVersion(t *testing.T) {
@@ -1190,7 +1189,7 @@ func TestWriteConfigFile(t *testing.T) {
 		t.Fatalf("writeConfigFile: %v", err)
 	}
 
-	got, err := os.ReadFile(path)
+	got, err := os.ReadFile(path) //nolint:gosec // reads a temp-dir fixture the test just wrote.
 	if err != nil {
 		t.Fatalf("read back: %v", err)
 	}
@@ -1207,120 +1206,120 @@ func TestWriteConfigFile(t *testing.T) {
 	}
 }
 
-func TestHandleConfigUpload(t *testing.T) {
-	validBody := `{"containers":[{"name":"web","image":"nginx","ports":[{"host_port":8081,"container_port":80}]}]}`
+// validConfigUploadBody is a minimal valid /config request body shared by the
+// upload tests.
+const validConfigUploadBody = `{"containers":[{"name":"web","image":"nginx","ports":[{"host_port":8081,"container_port":80}]}]}`
 
-	t.Run("method not allowed", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/config", nil)
-		rec := httptest.NewRecorder()
-		handleConfigUpload(rec, req, "unused")
-		if rec.Code != http.StatusMethodNotAllowed {
-			t.Fatalf("status = %d, want 405", rec.Code)
+func TestHandleConfigUploadMethodNotAllowed(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/config", nil)
+	rec := httptest.NewRecorder()
+	handleConfigUpload(rec, req, "unused")
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", rec.Code)
+	}
+}
+
+func TestHandleConfigUploadMalformedJSON(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "containers.json")
+	req := httptest.NewRequest(http.MethodPost, "/config", strings.NewReader("{not json"))
+	rec := httptest.NewRecorder()
+	handleConfigUpload(rec, req, path)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("config file must not be created on parse failure")
+	}
+}
+
+func TestHandleConfigUploadInvalidConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "containers.json")
+	applied := false
+	defer stubConfigApplier(func(*Config) error { applied = true; return nil })()
+
+	body := `{"firewall_ports":[{"port":"70000"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/config", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	handleConfigUpload(rec, req, path)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if applied {
+		t.Fatalf("invalid config must not be applied")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("invalid config must not be written")
+	}
+}
+
+func TestHandleConfigUploadRejectionLogged(t *testing.T) {
+	ring := newLogRing(servermasterLogTail)
+	orig := log.Writer()
+	log.SetOutput(ring)
+	defer log.SetOutput(orig)
+
+	path := filepath.Join(t.TempDir(), "containers.json")
+	body := `{"interfaces":[{"name":"dummy0","ip_address":"192.168.1.10"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/config", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	handleConfigUpload(rec, req, path)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+
+	found := false
+	for _, line := range ring.snapshot() {
+		if strings.Contains(line, "invalid config") && strings.Contains(line, "dummy0") {
+			found = true
+			break
 		}
-	})
+	}
+	if !found {
+		t.Fatalf("rejection was not logged; ring = %v", ring.snapshot())
+	}
+}
 
-	t.Run("malformed json is rejected without writing", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), "containers.json")
-		req := httptest.NewRequest(http.MethodPost, "/config", strings.NewReader("{not json"))
-		rec := httptest.NewRecorder()
-		handleConfigUpload(rec, req, path)
+func TestHandleConfigUploadValid(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "containers.json")
+	var appliedCfg *Config
+	defer stubConfigApplier(func(c *Config) error { appliedCfg = c; return nil })()
 
-		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
-		}
-		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Fatalf("config file must not be created on parse failure")
-		}
-	})
+	req := httptest.NewRequest(http.MethodPost, "/config", strings.NewReader(validConfigUploadBody))
+	rec := httptest.NewRecorder()
+	handleConfigUpload(rec, req, path)
 
-	t.Run("invalid config is rejected without writing or applying", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), "containers.json")
-		applied := false
-		defer stubConfigApplier(func(*Config) error { applied = true; return nil })()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if appliedCfg == nil || len(appliedCfg.Containers) != 1 || appliedCfg.Containers[0].Name != "web" {
+		t.Fatalf("apply received unexpected config: %+v", appliedCfg)
+	}
+	got, err := os.ReadFile(path) //nolint:gosec // reads a temp-dir fixture the test just wrote.
+	if err != nil {
+		t.Fatalf("read saved config: %v", err)
+	}
+	if string(got) != validConfigUploadBody {
+		t.Fatalf("saved config = %q, want the uploaded body verbatim", got)
+	}
+}
 
-		body := `{"firewall_ports":[{"port":"70000"}]}`
-		req := httptest.NewRequest(http.MethodPost, "/config", strings.NewReader(body))
-		rec := httptest.NewRecorder()
-		handleConfigUpload(rec, req, path)
+func TestHandleConfigUploadApplyFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "containers.json")
+	defer stubConfigApplier(func(*Config) error { return fmt.Errorf("firewalld down") })()
 
-		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
-		}
-		if applied {
-			t.Fatalf("invalid config must not be applied")
-		}
-		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Fatalf("invalid config must not be written")
-		}
-	})
+	req := httptest.NewRequest(http.MethodPost, "/config", strings.NewReader(validConfigUploadBody))
+	rec := httptest.NewRecorder()
+	handleConfigUpload(rec, req, path)
 
-	t.Run("rejection is logged so it reaches servermaster_log", func(t *testing.T) {
-		ring := newLogRing(servermasterLogTail)
-		orig := log.Writer()
-		log.SetOutput(ring)
-		defer log.SetOutput(orig)
-
-		path := filepath.Join(t.TempDir(), "containers.json")
-		body := `{"interfaces":[{"name":"dummy0","ip_address":"192.168.1.10"}]}`
-		req := httptest.NewRequest(http.MethodPost, "/config", strings.NewReader(body))
-		rec := httptest.NewRecorder()
-		handleConfigUpload(rec, req, path)
-
-		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
-		}
-
-		found := false
-		for _, line := range ring.snapshot() {
-			if strings.Contains(line, "invalid config") && strings.Contains(line, "dummy0") {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Fatalf("rejection was not logged; ring = %v", ring.snapshot())
-		}
-	})
-
-	t.Run("valid config is saved and applied", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), "containers.json")
-		var appliedCfg *Config
-		defer stubConfigApplier(func(c *Config) error { appliedCfg = c; return nil })()
-
-		req := httptest.NewRequest(http.MethodPost, "/config", strings.NewReader(validBody))
-		rec := httptest.NewRecorder()
-		handleConfigUpload(rec, req, path)
-
-		if rec.Code != http.StatusOK {
-			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-		}
-		if appliedCfg == nil || len(appliedCfg.Containers) != 1 || appliedCfg.Containers[0].Name != "web" {
-			t.Fatalf("apply received unexpected config: %+v", appliedCfg)
-		}
-		got, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read saved config: %v", err)
-		}
-		if string(got) != validBody {
-			t.Fatalf("saved config = %q, want the uploaded body verbatim", got)
-		}
-	})
-
-	t.Run("apply failure reports 500 but keeps the saved config", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), "containers.json")
-		defer stubConfigApplier(func(*Config) error { return fmt.Errorf("firewalld down") })()
-
-		req := httptest.NewRequest(http.MethodPost, "/config", strings.NewReader(validBody))
-		rec := httptest.NewRecorder()
-		handleConfigUpload(rec, req, path)
-
-		if rec.Code != http.StatusInternalServerError {
-			t.Fatalf("status = %d, want 500; body=%s", rec.Code, rec.Body.String())
-		}
-		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("config must remain saved after an apply failure: %v", err)
-		}
-	})
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("config must remain saved after an apply failure: %v", err)
+	}
 }
 
 func TestOstreeUploadPath(t *testing.T) {
@@ -1349,7 +1348,7 @@ func TestHandleOstreeUpload(t *testing.T) {
 	dest := filepath.Join(dir, "images", "update.tar") // nested dir must be created
 	cfgPath := filepath.Join(dir, "config.json")
 	cfgJSON := fmt.Sprintf(`{"ostree":{"upload_path":%q}}`, dest)
-	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0o644); err != nil {
+	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1361,7 +1360,7 @@ func TestHandleOstreeUpload(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	got, err := os.ReadFile(dest)
+	got, err := os.ReadFile(dest) //nolint:gosec // reads a temp-dir fixture the test just wrote.
 	if err != nil {
 		t.Fatalf("read dest: %v", err)
 	}

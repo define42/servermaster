@@ -101,15 +101,9 @@ func rpmArch(goarch string) string {
 }
 
 func writeRPM(o options) error {
-	var requires rpmpack.Relations
-	for _, dep := range []string{"podman", "nmstate"} {
-		if err := requires.Set(dep); err != nil {
-			return fmt.Errorf("add require %q: %w", dep, err)
-		}
-	}
-	var recommends rpmpack.Relations
-	if err := recommends.Set("firewalld"); err != nil {
-		return fmt.Errorf("add recommend %q: %w", "firewalld", err)
+	requires, recommends, err := packageRelations()
+	if err != nil {
+		return err
 	}
 
 	rpm, err := rpmpack.NewRPM(rpmpack.RPMMetaData{
@@ -128,11 +122,48 @@ func writeRPM(o options) error {
 		return err
 	}
 
+	if err := addPackageFiles(rpm, o); err != nil {
+		return err
+	}
+
+	rpm.AddPostin(postinScript)
+	rpm.AddPreun(preunScript)
+	rpm.AddPostun(postunScript)
+
+	dst, err := os.Create(o.out)
+	if err != nil {
+		return err
+	}
+	if err := rpm.Write(dst); err != nil {
+		_ = dst.Close()
+		return err
+	}
+	return dst.Close()
+}
+
+// packageRelations builds the RPM's hard requires (podman, nmstate) and soft
+// recommends (firewalld).
+func packageRelations() (requires, recommends rpmpack.Relations, err error) {
+	for _, dep := range []string{"podman", "nmstate"} {
+		if err := requires.Set(dep); err != nil {
+			return nil, nil, fmt.Errorf("add require %q: %w", dep, err)
+		}
+	}
+	if err := recommends.Set("firewalld"); err != nil {
+		return nil, nil, fmt.Errorf("add recommend %q: %w", "firewalld", err)
+	}
+	return requires, recommends, nil
+}
+
+// addPackageFiles adds the binary, systemd unit, and license to the RPM, all
+// stamped with the binary's mtime so the package is reproducible for a given
+// build artifact.
+func addPackageFiles(rpm *rpmpack.RPM, o options) error {
 	st, err := os.Stat(o.binarySrc)
 	if err != nil {
 		return err
 	}
-	mtime := uint32(st.ModTime().Unix())
+	mtime := uint32(st.ModTime().Unix()) //nolint:gosec // RPM MTime is uint32 epoch seconds; build-artifact mtimes are positive and well within range.
 
 	files := []struct {
 		src  string
@@ -158,18 +189,5 @@ func writeRPM(o options) error {
 			Type:  rpmpack.GenericFile,
 		})
 	}
-
-	rpm.AddPostin(postinScript)
-	rpm.AddPreun(preunScript)
-	rpm.AddPostun(postunScript)
-
-	dst, err := os.Create(o.out)
-	if err != nil {
-		return err
-	}
-	if err := rpm.Write(dst); err != nil {
-		_ = dst.Close()
-		return err
-	}
-	return dst.Close()
+	return nil
 }

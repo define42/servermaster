@@ -1,3 +1,8 @@
+// Command servermaster reconciles a Red Hat Device Edge node to a JSON
+// configuration: it manages host folders and files, host network interfaces
+// (through nmstate), firewalld ports, and the Podman containers that should be
+// present, treating config.json as the single source of truth for node state.
+// It also serves a status endpoint and the ostree OS-update endpoints on :8080.
 package main
 
 import (
@@ -74,19 +79,27 @@ const (
 // applyMu serializes host convergence so the startup reconcile and concurrent
 // /config uploads cannot interleave changes to folders, interfaces, firewall,
 // or containers. Callers hold it across the whole apply.
+//
+//nolint:gochecknoglobals // process-wide lock guarding the single host apply.
 var applyMu sync.Mutex
 
 // configApplier converges the host to a parsed config. It is a package variable
 // so tests can substitute the host-mutating apply; production uses applyConfig.
+//
+//nolint:gochecknoglobals // injectable seam so handlers can be tested without mutating the host.
 var configApplier = applyConfig
 
 // servermasterStatusCollector gathers the /servermaster response. Tests replace
 // it so the handler can be exercised without requiring Podman or ostree.
+//
+//nolint:gochecknoglobals // injectable seam so the handler can be tested without Podman or ostree.
 var servermasterStatusCollector = collectServermasterStatus
 
 // serviceLog retains the most recent log lines in memory so the /servermaster
 // endpoint can surface them in servermaster_log. captureServiceLog tees the
 // standard logger into it at startup.
+//
+//nolint:gochecknoglobals // process-wide log ring teed from the standard logger.
 var serviceLog = newLogRing(servermasterLogTail)
 
 // logRing is a bounded, concurrency-safe buffer of the most recent log lines. It
@@ -99,8 +112,8 @@ type logRing struct {
 	max   int
 }
 
-func newLogRing(max int) *logRing {
-	return &logRing{max: max}
+func newLogRing(size int) *logRing {
+	return &logRing{max: size}
 }
 
 func (r *logRing) Write(p []byte) (int, error) {
@@ -589,7 +602,7 @@ func diskStatusForPath(path string) (diskStatus, error) {
 		return diskStatus{}, fmt.Errorf("%s: %w", path, err)
 	}
 
-	blockSize := uint64(stat.Bsize)
+	blockSize := uint64(stat.Bsize) //nolint:gosec // Statfs block size is a kernel-reported positive value.
 	total := stat.Blocks * blockSize
 	free := stat.Bfree * blockSize
 	available := stat.Bavail * blockSize
@@ -683,7 +696,7 @@ func handleConfigUpload(w http.ResponseWriter, r *http.Request, configPath strin
 // truncated config where the next boot would load it.
 func writeConfigFile(path string, body []byte) error {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // operator-owned config dir; traversable by design on this single-tenant node.
 		return fmt.Errorf("create config dir %q: %w", dir, err)
 	}
 
@@ -703,7 +716,7 @@ func writeConfigFile(path string, body []byte) error {
 		return fmt.Errorf("close config: %w", closeErr)
 	}
 
-	if err := os.Chmod(tmpName, 0o644); err != nil {
+	if err := os.Chmod(tmpName, 0o644); err != nil { //nolint:gosec // config is intentionally world-readable for operator inspection on the node.
 		return fmt.Errorf("set config mode: %w", err)
 	}
 
@@ -734,7 +747,7 @@ func handleOstreeUpload(w http.ResponseWriter, r *http.Request, configPath strin
 
 	dest := ostreeUploadPath(cfg)
 	dir := filepath.Dir(dest)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // operator-owned staging dir; traversable by design on this single-tenant node.
 		http.Error(w, fmt.Sprintf("create upload dir: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -1090,7 +1103,7 @@ func applyConfig(cfg *Config) error {
 }
 
 func loadConfig(path string) (*Config, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) //nolint:gosec // path is the operator-supplied config location, not attacker input.
 	if err != nil {
 		return nil, err
 	}
@@ -1107,61 +1120,79 @@ func validateConfig(cfg *Config) error {
 	if mode := strings.TrimSpace(cfg.PodmanMode); mode != "" && mode != podmanRootfulMode {
 		return fmt.Errorf("podman_mode must be %q or empty", podmanRootfulMode)
 	}
-
-	for i, folder := range cfg.Folders {
-		folderLabel := folder.Path
-		if folderLabel == "" {
-			folderLabel = fmt.Sprintf("#%d", i)
-		}
-
-		if folder.Path == "" {
-			return fmt.Errorf("folder %s is missing path", folderLabel)
-		}
-		if folder.Chmod != "" {
-			if _, err := parseFileMode(folder.Chmod); err != nil {
-				return fmt.Errorf("invalid chmod %q for folder %s: %w", folder.Chmod, folderLabel, err)
-			}
-		}
-		if folder.User != "" {
-			if _, _, err := parseOwner(folder.User); err != nil {
-				return fmt.Errorf("invalid user %q for folder %s: %w", folder.User, folderLabel, err)
-			}
-		}
+	if err := validateFolders(cfg.Folders); err != nil {
+		return err
 	}
-
-	for i, file := range cfg.Files {
-		fileLabel := file.Path
-		if fileLabel == "" {
-			fileLabel = fmt.Sprintf("#%d", i)
-		}
-
-		if file.Path == "" {
-			return fmt.Errorf("file %s is missing path", fileLabel)
-		}
-		if file.Chmod != "" {
-			if _, err := parseFileMode(file.Chmod); err != nil {
-				return fmt.Errorf("invalid chmod %q for file %s: %w", file.Chmod, fileLabel, err)
-			}
-		}
-		if file.User != "" {
-			if _, _, err := parseOwner(file.User); err != nil {
-				return fmt.Errorf("invalid user %q for file %s: %w", file.User, fileLabel, err)
-			}
-		}
-		// Decoding validates the encoding name and (for base64) the content
-		// without writing anything, so a bad file is rejected before any apply.
-		if _, err := decodeFileContent(file); err != nil {
-			return fmt.Errorf("invalid content for file %s: %w", fileLabel, err)
-		}
+	if err := validateFiles(cfg.Files); err != nil {
+		return err
 	}
-
 	// buildNMState validates the interface config (names, paired ip/subnet,
 	// addresses within subnet, parseable gateway/DNS) without side effects.
 	if _, err := buildNMState(cfg.Interfaces); err != nil {
 		return err
 	}
+	if err := validateFirewallPortConfigs(cfg.FirewallPorts); err != nil {
+		return err
+	}
+	return validateContainers(cfg.Containers)
+}
 
-	for i, port := range cfg.FirewallPorts {
+// labelOrIndex returns name when it is set, otherwise a positional "#i" label
+// used in validation messages for an unnamed config entry.
+func labelOrIndex(name string, i int) string {
+	if name == "" {
+		return fmt.Sprintf("#%d", i)
+	}
+	return name
+}
+
+func validateFolders(folders []FolderConfig) error {
+	for i, folder := range folders {
+		label := labelOrIndex(folder.Path, i)
+		if folder.Path == "" {
+			return fmt.Errorf("folder %s is missing path", label)
+		}
+		if folder.Chmod != "" {
+			if _, err := parseFileMode(folder.Chmod); err != nil {
+				return fmt.Errorf("invalid chmod %q for folder %s: %w", folder.Chmod, label, err)
+			}
+		}
+		if folder.User != "" {
+			if _, _, err := parseOwner(folder.User); err != nil {
+				return fmt.Errorf("invalid user %q for folder %s: %w", folder.User, label, err)
+			}
+		}
+	}
+	return nil
+}
+
+func validateFiles(files []FileConfig) error {
+	for i, file := range files {
+		label := labelOrIndex(file.Path, i)
+		if file.Path == "" {
+			return fmt.Errorf("file %s is missing path", label)
+		}
+		if file.Chmod != "" {
+			if _, err := parseFileMode(file.Chmod); err != nil {
+				return fmt.Errorf("invalid chmod %q for file %s: %w", file.Chmod, label, err)
+			}
+		}
+		if file.User != "" {
+			if _, _, err := parseOwner(file.User); err != nil {
+				return fmt.Errorf("invalid user %q for file %s: %w", file.User, label, err)
+			}
+		}
+		// Decoding validates the encoding name and (for base64) the content
+		// without writing anything, so a bad file is rejected before any apply.
+		if _, err := decodeFileContent(file); err != nil {
+			return fmt.Errorf("invalid content for file %s: %w", label, err)
+		}
+	}
+	return nil
+}
+
+func validateFirewallPortConfigs(ports []FirewallPortConfig) error {
+	for i, port := range ports {
 		portLabel := strings.TrimSpace(port.Port)
 		if portLabel == "" {
 			portLabel = fmt.Sprintf("#%d", i)
@@ -1175,28 +1206,37 @@ func validateConfig(cfg *Config) error {
 			return fmt.Errorf("invalid firewall protocol for port %s: %w", portLabel, err)
 		}
 	}
+	return nil
+}
 
-	for _, c := range cfg.Containers {
-		if len(c.Interfaces) > 0 {
-			return fmt.Errorf("container %q defines interfaces; interfaces configure host interfaces and must be declared at the top level", c.Name)
+func validateContainers(containers []ContainerConfig) error {
+	for _, c := range containers {
+		if err := validateContainer(c); err != nil {
+			return err
 		}
+	}
+	return nil
+}
 
-		for _, p := range c.Ports {
-			if err := validateContainerPort(p.HostPort); err != nil {
-				return fmt.Errorf("container %q has invalid host_port %d: %w", c.Name, p.HostPort, err)
-			}
-			if err := validateContainerPort(p.ContainerPort); err != nil {
-				return fmt.Errorf("container %q has invalid container_port %d: %w", c.Name, p.ContainerPort, err)
-			}
+func validateContainer(c ContainerConfig) error {
+	if len(c.Interfaces) > 0 {
+		return fmt.Errorf("container %q defines interfaces; interfaces configure host interfaces and must be declared at the top level", c.Name)
+	}
+
+	for _, p := range c.Ports {
+		if err := validateContainerPort(p.HostPort); err != nil {
+			return fmt.Errorf("container %q has invalid host_port %d: %w", c.Name, p.HostPort, err)
 		}
-
-		for _, v := range c.Volumes {
-			if err := validateSELinuxRelabel(v.SELinux); err != nil {
-				return fmt.Errorf("container %q volume %q: %w", c.Name, v.ContainerPath, err)
-			}
+		if err := validateContainerPort(p.ContainerPort); err != nil {
+			return fmt.Errorf("container %q has invalid container_port %d: %w", c.Name, p.ContainerPort, err)
 		}
 	}
 
+	for _, v := range c.Volumes {
+		if err := validateSELinuxRelabel(v.SELinux); err != nil {
+			return fmt.Errorf("container %q volume %q: %w", c.Name, v.ContainerPath, err)
+		}
+	}
 	return nil
 }
 
@@ -1267,51 +1307,72 @@ func validateFirewallProtocol(protocol string) error {
 
 func ensureFolders(folders []FolderConfig) error {
 	for i, folder := range folders {
-		folderLabel := folder.Path
-		if folderLabel == "" {
-			folderLabel = fmt.Sprintf("#%d", i)
+		if err := ensureFolder(folder, labelOrIndex(folder.Path, i)); err != nil {
+			return err
 		}
+	}
+	return nil
+}
 
-		if folder.Path == "" {
-			return fmt.Errorf("folder %s is missing path", folderLabel)
-		}
+func ensureFolder(folder FolderConfig, label string) error {
+	if folder.Path == "" {
+		return fmt.Errorf("folder %s is missing path", label)
+	}
 
-		var mode os.FileMode
-		if folder.Chmod != "" {
-			parsedMode, err := parseFileMode(folder.Chmod)
-			if err != nil {
-				return fmt.Errorf("invalid chmod %q for folder %s: %w", folder.Chmod, folderLabel, err)
-			}
-			mode = parsedMode
-		}
+	mode, hasMode, err := parseOptionalMode(folder.Chmod, "folder", label)
+	if err != nil {
+		return err
+	}
 
-		uid, gid := -1, -1
-		if folder.User != "" {
-			parsedUID, parsedGID, err := parseOwner(folder.User)
-			if err != nil {
-				return fmt.Errorf("invalid user %q for folder %s: %w", folder.User, folderLabel, err)
-			}
-			uid, gid = parsedUID, parsedGID
-		}
+	uid, gid, err := parseOptionalOwner(folder.User, "folder", label)
+	if err != nil {
+		return err
+	}
 
-		if err := os.MkdirAll(folder.Path, 0o755); err != nil {
-			return fmt.Errorf("create folder %q failed: %w", folder.Path, err)
-		}
+	if err := os.MkdirAll(folder.Path, 0o755); err != nil { //nolint:gosec // operator-declared folder; 0755 lets non-root container users traverse it.
+		return fmt.Errorf("create folder %q failed: %w", folder.Path, err)
+	}
 
-		if uid != -1 || gid != -1 {
-			if err := os.Chown(folder.Path, uid, gid); err != nil {
-				return fmt.Errorf("set owner for folder %q failed: %w", folder.Path, err)
-			}
-		}
-
-		if folder.Chmod != "" {
-			if err := os.Chmod(folder.Path, mode); err != nil {
-				return fmt.Errorf("set chmod for folder %q failed: %w", folder.Path, err)
-			}
+	if uid != -1 || gid != -1 {
+		if err := os.Chown(folder.Path, uid, gid); err != nil {
+			return fmt.Errorf("set owner for folder %q failed: %w", folder.Path, err)
 		}
 	}
 
+	if hasMode {
+		if err := os.Chmod(folder.Path, mode); err != nil {
+			return fmt.Errorf("set chmod for folder %q failed: %w", folder.Path, err)
+		}
+	}
 	return nil
+}
+
+// parseOptionalMode parses an optional chmod string. has reports whether a chmod
+// was declared, so the caller only applies a mode when one was requested. kind
+// ("folder"/"file") names the entry in the error message.
+func parseOptionalMode(chmod, kind, label string) (mode os.FileMode, has bool, err error) {
+	if chmod == "" {
+		return 0, false, nil
+	}
+	mode, err = parseFileMode(chmod)
+	if err != nil {
+		return 0, false, fmt.Errorf("invalid chmod %q for %s %s: %w", chmod, kind, label, err)
+	}
+	return mode, true, nil
+}
+
+// parseOptionalOwner parses an optional "user[:group]" string, returning
+// (-1, -1) when none is declared so the caller skips chown. kind ("folder"/
+// "file") names the entry in the error message.
+func parseOptionalOwner(user, kind, label string) (uid, gid int, err error) {
+	if user == "" {
+		return -1, -1, nil
+	}
+	uid, gid, err = parseOwner(user)
+	if err != nil {
+		return -1, -1, fmt.Errorf("invalid user %q for %s %s: %w", user, kind, label, err)
+	}
+	return uid, gid, nil
 }
 
 // ensureFiles writes each declared file to its path, creating parent directories
@@ -1320,60 +1381,56 @@ func ensureFolders(folders []FolderConfig) error {
 // it is idempotent: rewriting a file that already matches is harmless.
 func ensureFiles(files []FileConfig) error {
 	for i, file := range files {
-		fileLabel := file.Path
-		if fileLabel == "" {
-			fileLabel = fmt.Sprintf("#%d", i)
+		if err := ensureFile(file, labelOrIndex(file.Path, i)); err != nil {
+			return err
 		}
+	}
+	return nil
+}
 
-		if file.Path == "" {
-			return fmt.Errorf("file %s is missing path", fileLabel)
-		}
+func ensureFile(file FileConfig, label string) error {
+	if file.Path == "" {
+		return fmt.Errorf("file %s is missing path", label)
+	}
 
-		content, err := decodeFileContent(file)
-		if err != nil {
-			return fmt.Errorf("decode content for file %s: %w", fileLabel, err)
-		}
+	content, err := decodeFileContent(file)
+	if err != nil {
+		return fmt.Errorf("decode content for file %s: %w", label, err)
+	}
 
-		mode := os.FileMode(0o644)
-		if file.Chmod != "" {
-			parsedMode, err := parseFileMode(file.Chmod)
-			if err != nil {
-				return fmt.Errorf("invalid chmod %q for file %s: %w", file.Chmod, fileLabel, err)
-			}
-			mode = parsedMode
-		}
+	mode, hasMode, err := parseOptionalMode(file.Chmod, "file", label)
+	if err != nil {
+		return err
+	}
+	if !hasMode {
+		mode = os.FileMode(0o644)
+	}
 
-		uid, gid := -1, -1
-		if file.User != "" {
-			parsedUID, parsedGID, err := parseOwner(file.User)
-			if err != nil {
-				return fmt.Errorf("invalid user %q for file %s: %w", file.User, fileLabel, err)
-			}
-			uid, gid = parsedUID, parsedGID
-		}
+	uid, gid, err := parseOptionalOwner(file.User, "file", label)
+	if err != nil {
+		return err
+	}
 
-		if dir := filepath.Dir(file.Path); dir != "" {
-			if err := os.MkdirAll(dir, 0o755); err != nil {
-				return fmt.Errorf("create parent dir for file %q failed: %w", file.Path, err)
-			}
-		}
-
-		// Write with the target mode, then Chmod to defeat the process umask so
-		// the file lands at exactly the requested permissions.
-		if err := os.WriteFile(file.Path, content, mode); err != nil {
-			return fmt.Errorf("write file %q failed: %w", file.Path, err)
-		}
-		if err := os.Chmod(file.Path, mode); err != nil {
-			return fmt.Errorf("set chmod for file %q failed: %w", file.Path, err)
-		}
-
-		if uid != -1 || gid != -1 {
-			if err := os.Chown(file.Path, uid, gid); err != nil {
-				return fmt.Errorf("set owner for file %q failed: %w", file.Path, err)
-			}
+	if dir := filepath.Dir(file.Path); dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // parent of an operator-declared file; 0755 lets non-root container users traverse it.
+			return fmt.Errorf("create parent dir for file %q failed: %w", file.Path, err)
 		}
 	}
 
+	// Write with the target mode, then Chmod to defeat the process umask so
+	// the file lands at exactly the requested permissions.
+	if err := os.WriteFile(file.Path, content, mode); err != nil {
+		return fmt.Errorf("write file %q failed: %w", file.Path, err)
+	}
+	if err := os.Chmod(file.Path, mode); err != nil {
+		return fmt.Errorf("set chmod for file %q failed: %w", file.Path, err)
+	}
+
+	if uid != -1 || gid != -1 {
+		if err := os.Chown(file.Path, uid, gid); err != nil {
+			return fmt.Errorf("set owner for file %q failed: %w", file.Path, err)
+		}
+	}
 	return nil
 }
 
@@ -1514,28 +1571,8 @@ func configureFirewallPorts(ports []FirewallPortConfig) error {
 	}
 
 	for _, port := range ports {
-		zone := strings.TrimSpace(port.Zone)
-		portValue := strings.TrimSpace(port.Port)
-		protocol := strings.ToLower(strings.TrimSpace(port.Protocol))
-		if protocol == "" {
-			protocol = "tcp"
-		}
-
-		// Runtime config takes effect immediately, without a firewalld reload.
-		enabled, err := queryFirewallPort(firewalld, zone, portValue, protocol)
-		if err != nil {
-			return fmt.Errorf("query firewall port %s/%s failed: %w", portValue, protocol, err)
-		}
-		if !enabled {
-			if err := addFirewallPort(firewalld, zone, portValue, protocol); err != nil {
-				return fmt.Errorf("open firewall port %s/%s failed: %w", portValue, protocol, err)
-			}
-			log.Printf("opened firewall port %s/%s", portValue, protocol)
-		}
-
-		// Permanent config survives a firewalld reload and a reboot.
-		if err := ensurePermanentFirewallPort(conn, firewalld, config, zone, portValue, protocol); err != nil {
-			return fmt.Errorf("persist firewall port %s/%s failed: %w", portValue, protocol, err)
+		if err := openDeclaredFirewallPort(conn, firewalld, config, port); err != nil {
+			return err
 		}
 	}
 
@@ -1544,6 +1581,35 @@ func configureFirewallPorts(ports []FirewallPortConfig) error {
 		return err
 	}
 
+	return nil
+}
+
+// openDeclaredFirewallPort opens a single declared port in both the runtime and
+// permanent firewalld configuration, defaulting an empty protocol to tcp.
+func openDeclaredFirewallPort(conn *dbus.Conn, firewalld, config dbus.BusObject, port FirewallPortConfig) error {
+	zone := strings.TrimSpace(port.Zone)
+	portValue := strings.TrimSpace(port.Port)
+	protocol := strings.ToLower(strings.TrimSpace(port.Protocol))
+	if protocol == "" {
+		protocol = "tcp"
+	}
+
+	// Runtime config takes effect immediately, without a firewalld reload.
+	enabled, err := queryFirewallPort(firewalld, zone, portValue, protocol)
+	if err != nil {
+		return fmt.Errorf("query firewall port %s/%s failed: %w", portValue, protocol, err)
+	}
+	if !enabled {
+		if err := addFirewallPort(firewalld, zone, portValue, protocol); err != nil {
+			return fmt.Errorf("open firewall port %s/%s failed: %w", portValue, protocol, err)
+		}
+		log.Printf("opened firewall port %s/%s", portValue, protocol)
+	}
+
+	// Permanent config survives a firewalld reload and a reboot.
+	if err := ensurePermanentFirewallPort(conn, firewalld, config, zone, portValue, protocol); err != nil {
+		return fmt.Errorf("persist firewall port %s/%s failed: %w", portValue, protocol, err)
+	}
 	return nil
 }
 
@@ -1591,82 +1657,107 @@ func declaredFirewallPorts(ports []FirewallPortConfig, defaultZone string) map[s
 // `ssh` service) survives a reconcile only if re-declared as a port. declared
 // maps a zone name to the set of "port/proto" keys allowed in that zone.
 func removeUnmanagedFirewallRules(conn *dbus.Conn, firewalld, config dbus.BusObject, declared map[string]map[string]struct{}) error {
-	// Runtime config: changes take effect immediately.
-	var runtimeZones []string
-	if err := firewalld.Call(firewalldZoneInterface+".getZones", 0).Store(&runtimeZones); err != nil {
+	if err := removeUnmanagedRuntimeRules(firewalld, declared); err != nil {
+		return err
+	}
+	return removeUnmanagedPermanentRules(conn, config, declared)
+}
+
+// removeUnmanagedRuntimeRules prunes the runtime configuration, where changes
+// take effect immediately.
+func removeUnmanagedRuntimeRules(firewalld dbus.BusObject, declared map[string]map[string]struct{}) error {
+	var zones []string
+	if err := firewalld.Call(firewalldZoneInterface+".getZones", 0).Store(&zones); err != nil {
 		return fmt.Errorf("list runtime firewall zones failed: %w", err)
 	}
-	for _, zone := range runtimeZones {
-		var current [][]string
-		if err := firewalld.Call(firewalldZoneInterface+".getPorts", 0, zone).Store(&current); err != nil {
-			return fmt.Errorf("list runtime ports for zone %q failed: %w", zone, err)
-		}
-		for _, pp := range current {
-			if len(pp) != 2 {
-				continue
-			}
-			port, protocol := pp[0], pp[1]
-			if _, ok := declared[zone][firewallPortKey(port, protocol)]; ok {
-				continue
-			}
-			var appliedZone string
-			if err := firewalld.Call(firewalldZoneInterface+".removePort", 0, zone, port, protocol).Store(&appliedZone); err != nil {
-				return fmt.Errorf("close unmanaged firewall port %s/%s in zone %q failed: %w", port, protocol, zone, err)
-			}
-			log.Printf("closed unmanaged firewall port %s/%s in zone %s", port, protocol, zone)
-		}
-
-		var services []string
-		if err := firewalld.Call(firewalldZoneInterface+".getServices", 0, zone).Store(&services); err != nil {
-			return fmt.Errorf("list runtime services for zone %q failed: %w", zone, err)
-		}
-		for _, service := range services {
-			var appliedZone string
-			if err := firewalld.Call(firewalldZoneInterface+".removeService", 0, zone, service).Store(&appliedZone); err != nil {
-				return fmt.Errorf("remove firewall service %q in zone %q failed: %w", service, zone, err)
-			}
-			log.Printf("removed firewall service %s in zone %s", service, zone)
+	for _, zone := range zones {
+		if err := pruneRuntimeZone(firewalld, zone, declared[zone]); err != nil {
+			return err
 		}
 	}
+	return nil
+}
 
-	// Permanent config: changes survive a firewalld reload and a reboot.
-	var permanentZones []string
-	if err := config.Call(firewalldConfigInterface+".getZoneNames", 0).Store(&permanentZones); err != nil {
+func pruneRuntimeZone(firewalld dbus.BusObject, zone string, declared map[string]struct{}) error {
+	var current [][]string
+	if err := firewalld.Call(firewalldZoneInterface+".getPorts", 0, zone).Store(&current); err != nil {
+		return fmt.Errorf("list runtime ports for zone %q failed: %w", zone, err)
+	}
+	for _, pp := range current {
+		if len(pp) != 2 {
+			continue
+		}
+		port, protocol := pp[0], pp[1]
+		if _, ok := declared[firewallPortKey(port, protocol)]; ok {
+			continue
+		}
+		var appliedZone string
+		if err := firewalld.Call(firewalldZoneInterface+".removePort", 0, zone, port, protocol).Store(&appliedZone); err != nil {
+			return fmt.Errorf("close unmanaged firewall port %s/%s in zone %q failed: %w", port, protocol, zone, err)
+		}
+		log.Printf("closed unmanaged firewall port %s/%s in zone %s", port, protocol, zone)
+	}
+
+	var services []string
+	if err := firewalld.Call(firewalldZoneInterface+".getServices", 0, zone).Store(&services); err != nil {
+		return fmt.Errorf("list runtime services for zone %q failed: %w", zone, err)
+	}
+	for _, service := range services {
+		var appliedZone string
+		if err := firewalld.Call(firewalldZoneInterface+".removeService", 0, zone, service).Store(&appliedZone); err != nil {
+			return fmt.Errorf("remove firewall service %q in zone %q failed: %w", service, zone, err)
+		}
+		log.Printf("removed firewall service %s in zone %s", service, zone)
+	}
+	return nil
+}
+
+// removeUnmanagedPermanentRules prunes the permanent configuration, where
+// changes survive a firewalld reload and a reboot.
+func removeUnmanagedPermanentRules(conn *dbus.Conn, config dbus.BusObject, declared map[string]map[string]struct{}) error {
+	var zones []string
+	if err := config.Call(firewalldConfigInterface+".getZoneNames", 0).Store(&zones); err != nil {
 		return fmt.Errorf("list permanent firewall zones failed: %w", err)
 	}
-	for _, zone := range permanentZones {
-		var zonePath dbus.ObjectPath
-		if err := config.Call(firewalldConfigInterface+".getZoneByName", 0, zone).Store(&zonePath); err != nil {
-			return fmt.Errorf("look up permanent zone %q failed: %w", zone, err)
-		}
-		zoneObject := conn.Object(firewalldBusName, zonePath)
-
-		var current []firewallPortTuple
-		if err := zoneObject.Call(firewalldConfigZoneInterface+".getPorts", 0).Store(&current); err != nil {
-			return fmt.Errorf("list permanent ports for zone %q failed: %w", zone, err)
-		}
-		for _, pp := range current {
-			if _, ok := declared[zone][firewallPortKey(pp.Port, pp.Protocol)]; ok {
-				continue
-			}
-			if err := zoneObject.Call(firewalldConfigZoneInterface+".removePort", 0, pp.Port, pp.Protocol).Err; err != nil {
-				return fmt.Errorf("remove permanent firewall port %s/%s in zone %q failed: %w", pp.Port, pp.Protocol, zone, err)
-			}
-			log.Printf("removed unmanaged permanent firewall port %s/%s in zone %s", pp.Port, pp.Protocol, zone)
-		}
-
-		var services []string
-		if err := zoneObject.Call(firewalldConfigZoneInterface+".getServices", 0).Store(&services); err != nil {
-			return fmt.Errorf("list permanent services for zone %q failed: %w", zone, err)
-		}
-		for _, service := range services {
-			if err := zoneObject.Call(firewalldConfigZoneInterface+".removeService", 0, service).Err; err != nil {
-				return fmt.Errorf("remove permanent firewall service %q in zone %q failed: %w", service, zone, err)
-			}
-			log.Printf("removed permanent firewall service %s in zone %s", service, zone)
+	for _, zone := range zones {
+		if err := prunePermanentZone(conn, config, zone, declared[zone]); err != nil {
+			return err
 		}
 	}
+	return nil
+}
 
+func prunePermanentZone(conn *dbus.Conn, config dbus.BusObject, zone string, declared map[string]struct{}) error {
+	var zonePath dbus.ObjectPath
+	if err := config.Call(firewalldConfigInterface+".getZoneByName", 0, zone).Store(&zonePath); err != nil {
+		return fmt.Errorf("look up permanent zone %q failed: %w", zone, err)
+	}
+	zoneObject := conn.Object(firewalldBusName, zonePath)
+
+	var current []firewallPortTuple
+	if err := zoneObject.Call(firewalldConfigZoneInterface+".getPorts", 0).Store(&current); err != nil {
+		return fmt.Errorf("list permanent ports for zone %q failed: %w", zone, err)
+	}
+	for _, pp := range current {
+		if _, ok := declared[firewallPortKey(pp.Port, pp.Protocol)]; ok {
+			continue
+		}
+		if err := zoneObject.Call(firewalldConfigZoneInterface+".removePort", 0, pp.Port, pp.Protocol).Err; err != nil {
+			return fmt.Errorf("remove permanent firewall port %s/%s in zone %q failed: %w", pp.Port, pp.Protocol, zone, err)
+		}
+		log.Printf("removed unmanaged permanent firewall port %s/%s in zone %s", pp.Port, pp.Protocol, zone)
+	}
+
+	var services []string
+	if err := zoneObject.Call(firewalldConfigZoneInterface+".getServices", 0).Store(&services); err != nil {
+		return fmt.Errorf("list permanent services for zone %q failed: %w", zone, err)
+	}
+	for _, service := range services {
+		if err := zoneObject.Call(firewalldConfigZoneInterface+".removeService", 0, service).Err; err != nil {
+			return fmt.Errorf("remove permanent firewall service %q in zone %q failed: %w", service, zone, err)
+		}
+		log.Printf("removed permanent firewall service %s in zone %s", service, zone)
+	}
 	return nil
 }
 
@@ -1821,15 +1912,13 @@ func reconcileContainer(ctx context.Context, c ContainerConfig) error {
 		return fmt.Errorf("check container %q failed: %w", c.Name, err)
 	}
 
-	if exists {
-		inspect, err := inspectContainer(ctx, c.Name)
-		if err != nil {
-			return fmt.Errorf("inspect container %q failed: %w", c.Name, err)
-		}
-		if containerUpToDate(inspect, desiredHash) {
-			log.Printf("container %s unchanged, leaving it running", c.Name)
-			return nil
-		}
+	current, err := containerIsCurrent(ctx, c.Name, exists, desiredHash)
+	if err != nil {
+		return err
+	}
+	if current {
+		log.Printf("container %s unchanged, leaving it running", c.Name)
+		return nil
 	}
 
 	present, err := imageExists(ctx, c.Image)
@@ -1861,6 +1950,20 @@ func reconcileContainer(ctx context.Context, c ContainerConfig) error {
 	return nil
 }
 
+// containerIsCurrent reports whether an existing, declared container can be left
+// running untouched: it must already exist and, on inspection, be running with a
+// matching config hash. A container that does not exist is never current.
+func containerIsCurrent(ctx context.Context, name string, exists bool, desiredHash string) (bool, error) {
+	if !exists {
+		return false, nil
+	}
+	inspect, err := inspectContainer(ctx, name)
+	if err != nil {
+		return false, fmt.Errorf("inspect container %q failed: %w", name, err)
+	}
+	return containerUpToDate(inspect, desiredHash), nil
+}
+
 // containerUpToDate reports whether an existing container is running and was
 // created from the desired config (matching hash label). A stopped container, or
 // one created before this label existed or from a different config, is not up to
@@ -1890,10 +1993,14 @@ func createSpec(c ContainerConfig) (*containerSpec, error) {
 			proto = "tcp"
 		}
 
+		// validateConfig (run before any reconcile) guarantees both ports are in
+		// 1-65535, so neither uint16 conversion can overflow.
+		hostPort := uint16(p.HostPort)           //nolint:gosec // bounded to 1-65535 by validateConfig.
+		containerPort := uint16(p.ContainerPort) //nolint:gosec // bounded to 1-65535 by validateConfig.
 		s.PortMappings = append(s.PortMappings, portMapping{
 			HostIP:        p.HostIP,
-			HostPort:      uint16(p.HostPort),
-			ContainerPort: uint16(p.ContainerPort),
+			HostPort:      hostPort,
+			ContainerPort: containerPort,
 			Protocol:      proto,
 		})
 	}
@@ -2080,45 +2187,55 @@ func collectRunningContainerStatuses(ctx context.Context, logTail int) ([]runnin
 		if !containerIsRunning(container.State) {
 			continue
 		}
-
-		status := runningContainerStatus{
-			ID:    container.ID,
-			Name:  containerDisplayName(container),
-			Names: append([]string(nil), container.Names...),
-			State: container.State,
-			Image: container.Image,
-			Logs:  []string{},
-		}
-
-		inspect, err := inspectContainer(statusCtx, container.ID)
-		if err != nil {
-			status.Error = appendStatusError(status.Error, fmt.Sprintf("inspect: %v", err))
-		} else {
-			if inspect.Name != "" {
-				status.Name = strings.TrimPrefix(inspect.Name, "/")
-			}
-			if inspect.ImageName != "" {
-				status.Image = inspect.ImageName
-			}
-			status.ImageID = inspect.Image
-			status.ImageDigest = inspect.ImageDigest
-			status.Version = imageReferenceVersion(status.Image)
-			if status.Version == "" {
-				status.Version = imageReferenceVersion(status.ImageDigest)
-			}
-		}
-
-		logs, err := containerLogLines(statusCtx, container.ID, logTail)
-		if err != nil {
-			status.Error = appendStatusError(status.Error, fmt.Sprintf("logs: %v", err))
-		} else {
-			status.Logs = logs
-		}
-
-		running = append(running, status)
+		running = append(running, buildRunningContainerStatus(statusCtx, container, logTail))
 	}
 
 	return running, nil
+}
+
+// buildRunningContainerStatus assembles the status for one running container,
+// folding inspect and log failures into the status's Error field rather than
+// failing the whole collection.
+func buildRunningContainerStatus(ctx context.Context, container listedContainer, logTail int) runningContainerStatus {
+	status := runningContainerStatus{
+		ID:    container.ID,
+		Name:  containerDisplayName(container),
+		Names: append([]string(nil), container.Names...),
+		State: container.State,
+		Image: container.Image,
+		Logs:  []string{},
+	}
+
+	if inspect, err := inspectContainer(ctx, container.ID); err != nil {
+		status.Error = appendStatusError(status.Error, fmt.Sprintf("inspect: %v", err))
+	} else {
+		applyInspectToStatus(&status, inspect)
+	}
+
+	if logs, err := containerLogLines(ctx, container.ID, logTail); err != nil {
+		status.Error = appendStatusError(status.Error, fmt.Sprintf("logs: %v", err))
+	} else {
+		status.Logs = logs
+	}
+
+	return status
+}
+
+// applyInspectToStatus overlays the richer detail from a container inspect onto
+// the status built from the list entry.
+func applyInspectToStatus(status *runningContainerStatus, inspect containerInspectResponse) {
+	if inspect.Name != "" {
+		status.Name = strings.TrimPrefix(inspect.Name, "/")
+	}
+	if inspect.ImageName != "" {
+		status.Image = inspect.ImageName
+	}
+	status.ImageID = inspect.Image
+	status.ImageDigest = inspect.ImageDigest
+	status.Version = imageReferenceVersion(status.Image)
+	if status.Version == "" {
+		status.Version = imageReferenceVersion(status.ImageDigest)
+	}
 }
 
 func containerIsRunning(state string) bool {
@@ -2169,25 +2286,38 @@ func containerLogLines(ctx context.Context, nameOrID string, tail int) ([]string
 			return lines, err
 		}
 
-		stream := "stdout"
-		switch fd {
-		case 1:
-			stream = "stdout"
-		case 2:
-			stream = "stderr"
-		case 3:
-			return lines, fmt.Errorf("podman log stream error: %s", strings.TrimSpace(string(frame)))
+		frameLines, err := logFrameLines(fd, frame)
+		if err != nil {
+			return lines, err
 		}
-
-		for _, line := range splitLogFrame(string(frame)) {
-			lines = append(lines, stream+": "+line)
-		}
+		lines = append(lines, frameLines...)
 	}
 
 	if len(lines) > tail {
 		lines = lines[len(lines)-tail:]
 	}
 
+	return lines, nil
+}
+
+// logFrameLines turns one demuxed podman log frame into prefixed log lines, one
+// per text line. Channel 1 is stdout and 2 is stderr; channel 3 carries a
+// stream error, which is surfaced as an error.
+func logFrameLines(fd int, frame []byte) ([]string, error) {
+	stream := "stdout"
+	switch fd {
+	case 1:
+		stream = "stdout"
+	case 2:
+		stream = "stderr"
+	case 3:
+		return nil, fmt.Errorf("podman log stream error: %s", strings.TrimSpace(string(frame)))
+	}
+
+	var lines []string
+	for _, line := range splitLogFrame(string(frame)) {
+		lines = append(lines, stream+": "+line)
+	}
 	return lines, nil
 }
 
@@ -2428,6 +2558,8 @@ type nmDNSConfig struct {
 // netlink access points are indirected through variables so tests can supply
 // fixtures without a live kernel/network namespace. resolvConfPath is the file
 // the resolver nameservers are read from.
+//
+//nolint:gochecknoglobals // injectable seams so network status can be tested without a live kernel.
 var (
 	netlinkLinkList  = netlink.LinkList
 	netlinkAddrList  = netlink.AddrList
@@ -2571,7 +2703,7 @@ func routeFamily(route netlink.Route) string {
 // resolv.conf-formatted file. A missing or unreadable file yields no servers
 // (DNS is best-effort context, not a hard error for the status endpoint).
 func resolvConfNameservers(path string) []string {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // path is the fixed resolvConfPath (overridable only by tests), not request input.
 	if err != nil {
 		return nil
 	}
@@ -2605,10 +2737,10 @@ func configureHostInterfaces(interfaces []InterfaceConfig) error {
 		return fmt.Errorf("marshal nmstate document failed: %w", err)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(nmstateStatePath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(nmstateStatePath), 0o755); err != nil { //nolint:gosec // /etc/nmstate must stay traversable so nmstate.service can read the state at boot.
 		return fmt.Errorf("create nmstate dir %q failed: %w", filepath.Dir(nmstateStatePath), err)
 	}
-	if err := os.WriteFile(nmstateStatePath, document, 0o644); err != nil {
+	if err := os.WriteFile(nmstateStatePath, document, 0o644); err != nil { //nolint:gosec // nmstate.service reads this file to reapply network state at boot; not secret.
 		return fmt.Errorf("write nmstate document %q failed: %w", nmstateStatePath, err)
 	}
 
@@ -2634,101 +2766,28 @@ func buildNMState(interfaces []InterfaceConfig) (*nmState, error) {
 	seenDNS := make(map[string]struct{})
 
 	for i, iface := range interfaces {
-		ifaceLabel := iface.Name
-		if ifaceLabel == "" {
-			ifaceLabel = fmt.Sprintf("#%d", i)
+		label := labelOrIndex(iface.Name, i)
+
+		nmIface, err := buildNMInterface(iface, label)
+		if err != nil {
+			return nil, err
 		}
-
-		if iface.Name == "" {
-			return nil, fmt.Errorf("host interface %s is missing name", ifaceLabel)
-		}
-
-		if (iface.IPAddress == "") != (iface.Subnet == "") {
-			return nil, fmt.Errorf("host interface %q must set both ip_address and subnet", iface.Name)
-		}
-
-		// Defaults to a physical NIC (the documented use case, e.g. eth0). An
-		// explicit type lets nmstate manage other kinds it supports — "dummy" for
-		// a software test interface, or "vlan" for an 802.1Q tagged interface.
-		// nmstate validates the value at apply time. Bonds and bridges need extra
-		// params and remain out of scope for this schema.
-		ifaceType := strings.TrimSpace(iface.Type)
-		if ifaceType == "" {
-			ifaceType = "ethernet"
-		}
-		nmIface := nmInterface{Name: iface.Name, Type: ifaceType, State: "up"}
-
-		switch {
-		case ifaceType == "vlan":
-			if iface.VLAN == nil {
-				return nil, fmt.Errorf("host interface %s is type vlan but has no vlan settings", ifaceLabel)
-			}
-			base := strings.TrimSpace(iface.VLAN.BaseInterface)
-			if base == "" {
-				return nil, fmt.Errorf("host interface %s vlan is missing base_interface", ifaceLabel)
-			}
-			if iface.VLAN.ID < 1 || iface.VLAN.ID > 4094 {
-				return nil, fmt.Errorf("host interface %s vlan id %d must be between 1 and 4094", ifaceLabel, iface.VLAN.ID)
-			}
-			nmIface.VLAN = &nmVLAN{BaseIface: base, ID: iface.VLAN.ID}
-		case iface.VLAN != nil:
-			return nil, fmt.Errorf("host interface %s sets vlan settings but type is %q, not \"vlan\"", ifaceLabel, ifaceType)
-		}
-
-		if iface.IPAddress != "" {
-			ipNet, err := parseInterfaceAddress(iface.IPAddress, iface.Subnet)
-			if err != nil {
-				return nil, fmt.Errorf("invalid host interface %s address: %w", ifaceLabel, err)
-			}
-
-			prefix, _ := ipNet.Mask.Size()
-			stack := &nmIPStack{
-				Enabled:   true,
-				DHCP:      false,
-				Addresses: []nmAddress{{IP: ipNet.IP.String(), PrefixLength: prefix}},
-			}
-			if ipNet.IP.To4() != nil {
-				nmIface.IPv4 = stack
-			} else {
-				nmIface.IPv6 = stack
-			}
-		}
-
 		state.Interfaces = append(state.Interfaces, nmIface)
 
-		if iface.Gateway != "" {
-			gateway, err := parseAddr(iface.Gateway)
-			if err != nil {
-				return nil, fmt.Errorf("invalid gateway %q for host interface %s", iface.Gateway, ifaceLabel)
-			}
-
-			destination := "0.0.0.0/0"
-			if gateway.To4() == nil {
-				destination = "::/0"
-			}
-
+		route, err := gatewayRoute(iface, label)
+		if err != nil {
+			return nil, err
+		}
+		if route != nil {
 			if state.Routes == nil {
 				state.Routes = &nmRoutes{}
 			}
-			state.Routes.Config = append(state.Routes.Config, nmRoute{
-				Destination:      destination,
-				NextHopAddress:   gateway.String(),
-				NextHopInterface: iface.Name,
-			})
+			state.Routes.Config = append(state.Routes.Config, *route)
 		}
 
-		for _, dns := range iface.DNS {
-			dnsIP, err := parseAddr(dns)
-			if err != nil {
-				return nil, fmt.Errorf("invalid dns server %q for host interface %s", dns, ifaceLabel)
-			}
-
-			key := dnsIP.String()
-			if _, seen := seenDNS[key]; seen {
-				continue
-			}
-			seenDNS[key] = struct{}{}
-			dnsServers = append(dnsServers, key)
+		dnsServers, err = appendInterfaceDNS(iface, label, seenDNS, dnsServers)
+		if err != nil {
+			return nil, err
 		}
 	}
 
@@ -2737,6 +2796,124 @@ func buildNMState(interfaces []InterfaceConfig) (*nmState, error) {
 	}
 
 	return state, nil
+}
+
+// buildNMInterface translates one InterfaceConfig into an nmstate interface,
+// validating its name, paired ip_address/subnet, optional VLAN settings, and
+// (when set) its static address.
+func buildNMInterface(iface InterfaceConfig, label string) (nmInterface, error) {
+	if iface.Name == "" {
+		return nmInterface{}, fmt.Errorf("host interface %s is missing name", label)
+	}
+
+	if (iface.IPAddress == "") != (iface.Subnet == "") {
+		return nmInterface{}, fmt.Errorf("host interface %q must set both ip_address and subnet", iface.Name)
+	}
+
+	// Defaults to a physical NIC (the documented use case, e.g. eth0). An
+	// explicit type lets nmstate manage other kinds it supports — "dummy" for
+	// a software test interface, or "vlan" for an 802.1Q tagged interface.
+	// nmstate validates the value at apply time. Bonds and bridges need extra
+	// params and remain out of scope for this schema.
+	ifaceType := strings.TrimSpace(iface.Type)
+	if ifaceType == "" {
+		ifaceType = "ethernet"
+	}
+	nmIface := nmInterface{Name: iface.Name, Type: ifaceType, State: "up"}
+
+	vlan, err := interfaceVLAN(iface, label, ifaceType)
+	if err != nil {
+		return nmInterface{}, err
+	}
+	nmIface.VLAN = vlan
+
+	if iface.IPAddress != "" {
+		ipNet, err := parseInterfaceAddress(iface.IPAddress, iface.Subnet)
+		if err != nil {
+			return nmInterface{}, fmt.Errorf("invalid host interface %s address: %w", label, err)
+		}
+
+		prefix, _ := ipNet.Mask.Size()
+		stack := &nmIPStack{
+			Enabled:   true,
+			DHCP:      false,
+			Addresses: []nmAddress{{IP: ipNet.IP.String(), PrefixLength: prefix}},
+		}
+		if ipNet.IP.To4() != nil {
+			nmIface.IPv4 = stack
+		} else {
+			nmIface.IPv6 = stack
+		}
+	}
+
+	return nmIface, nil
+}
+
+// interfaceVLAN validates and builds an interface's VLAN settings. It returns
+// nil when the interface is not a VLAN, and an error when vlan settings are
+// missing for a "vlan" interface or present on a non-VLAN one.
+func interfaceVLAN(iface InterfaceConfig, label, ifaceType string) (*nmVLAN, error) {
+	switch {
+	case ifaceType == "vlan":
+		if iface.VLAN == nil {
+			return nil, fmt.Errorf("host interface %s is type vlan but has no vlan settings", label)
+		}
+		base := strings.TrimSpace(iface.VLAN.BaseInterface)
+		if base == "" {
+			return nil, fmt.Errorf("host interface %s vlan is missing base_interface", label)
+		}
+		if iface.VLAN.ID < 1 || iface.VLAN.ID > 4094 {
+			return nil, fmt.Errorf("host interface %s vlan id %d must be between 1 and 4094", label, iface.VLAN.ID)
+		}
+		return &nmVLAN{BaseIface: base, ID: iface.VLAN.ID}, nil
+	case iface.VLAN != nil:
+		return nil, fmt.Errorf("host interface %s sets vlan settings but type is %q, not \"vlan\"", label, ifaceType)
+	default:
+		return nil, nil
+	}
+}
+
+// gatewayRoute builds the default route for an interface's gateway, returning
+// nil when no gateway is declared.
+func gatewayRoute(iface InterfaceConfig, label string) (*nmRoute, error) {
+	if iface.Gateway == "" {
+		return nil, nil
+	}
+
+	gateway, err := parseAddr(iface.Gateway)
+	if err != nil {
+		return nil, fmt.Errorf("invalid gateway %q for host interface %s", iface.Gateway, label)
+	}
+
+	destination := "0.0.0.0/0"
+	if gateway.To4() == nil {
+		destination = "::/0"
+	}
+
+	return &nmRoute{
+		Destination:      destination,
+		NextHopAddress:   gateway.String(),
+		NextHopInterface: iface.Name,
+	}, nil
+}
+
+// appendInterfaceDNS validates an interface's DNS servers and appends the ones
+// not already in seen to servers, preserving first-seen order across interfaces.
+func appendInterfaceDNS(iface InterfaceConfig, label string, seen map[string]struct{}, servers []string) ([]string, error) {
+	for _, dns := range iface.DNS {
+		dnsIP, err := parseAddr(dns)
+		if err != nil {
+			return nil, fmt.Errorf("invalid dns server %q for host interface %s", dns, label)
+		}
+
+		key := dnsIP.String()
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		servers = append(servers, key)
+	}
+	return servers, nil
 }
 
 func parseInterfaceAddress(address string, subnet string) (*net.IPNet, error) {
@@ -2766,7 +2943,7 @@ func parseAddr(addr string) (net.IP, error) {
 }
 
 func runCommand(name string, args ...string) error {
-	cmd := exec.Command(name, args...)
+	cmd := exec.Command(name, args...) //nolint:gosec // runs operator-declared host commands (e.g. ostree.apply_command); managing the host is this tool's purpose.
 	output, err := cmd.CombinedOutput()
 	if err == nil {
 		return nil
@@ -2781,7 +2958,7 @@ func runCommand(name string, args ...string) error {
 }
 
 func runCommandOutput(ctx context.Context, name string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // runs fixed status/apply commands (nmstatectl, rpm-ostree, …), not request input.
 	output, err := cmd.CombinedOutput()
 	if err == nil {
 		return output, nil

@@ -40,16 +40,17 @@ func TestStartWebServer(t *testing.T) {
 		t.Fatalf("startWebServer: %v", err)
 	}
 
-	// "/" serves the running banner; an unknown path under "/" is a 404.
-	assertGet(t, "http://"+addr+"/", http.StatusOK, "servermaster running")
+	// Only the /servermaster/* namespace is registered.
+	assertGet(t, "http://"+addr+"/", http.StatusNotFound, "")
 	assertGet(t, "http://"+addr+"/nope", http.StatusNotFound, "")
+	assertGet(t, "http://"+addr+apiHealthPath, http.StatusOK, "servermaster running")
 
 	// Each endpoint's wrong-method path is a cheap way to exercise its
 	// registration without invoking the heavy collectors.
-	assertStatus(t, http.MethodPost, "http://"+addr+"/servermaster", http.StatusMethodNotAllowed)
-	assertStatus(t, http.MethodGet, "http://"+addr+"/config", http.StatusMethodNotAllowed)
-	assertStatus(t, http.MethodGet, "http://"+addr+"/ostree/upload", http.StatusMethodNotAllowed)
-	assertStatus(t, http.MethodGet, "http://"+addr+"/ostree/upgrade", http.StatusMethodNotAllowed)
+	assertStatus(t, http.MethodPost, "http://"+addr+apiStatusPath, http.StatusMethodNotAllowed)
+	assertStatus(t, http.MethodGet, "http://"+addr+apiConfigPath, http.StatusMethodNotAllowed)
+	assertStatus(t, http.MethodGet, "http://"+addr+apiOstreeUploadPath, http.StatusMethodNotAllowed)
+	assertStatus(t, http.MethodGet, "http://"+addr+apiOstreeUpgradePath, http.StatusMethodNotAllowed)
 
 	if err := server.Close(); err != nil {
 		t.Fatalf("close: %v", err)
@@ -217,7 +218,7 @@ func TestWriteConfigFileMkdirError(t *testing.T) {
 
 func TestHandleConfigUploadTooLarge(t *testing.T) {
 	big := strings.Repeat("a", (1<<20)+16)
-	req := httptest.NewRequest(http.MethodPost, "/config", strings.NewReader(big))
+	req := httptest.NewRequest(http.MethodPost, apiConfigPath, strings.NewReader(big))
 	rec := httptest.NewRecorder()
 	handleConfigUpload(rec, req, filepath.Join(t.TempDir(), "c.json"))
 	if rec.Code != http.StatusBadRequest {
@@ -234,7 +235,7 @@ func TestHandleConfigUploadSaveError(t *testing.T) {
 	// The config path's parent is a regular file, so the atomic write fails
 	// after validation passes.
 	path := filepath.Join(blocker, "sub", "config.json")
-	req := httptest.NewRequest(http.MethodPost, "/config", strings.NewReader(validConfigUploadBody))
+	req := httptest.NewRequest(http.MethodPost, apiConfigPath, strings.NewReader(validConfigUploadBody))
 	rec := httptest.NewRecorder()
 	handleConfigUpload(rec, req, path)
 	if rec.Code != http.StatusInternalServerError {
@@ -243,7 +244,7 @@ func TestHandleConfigUploadSaveError(t *testing.T) {
 }
 
 func TestHandleOstreeUploadLoadConfigError(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPost, "/ostree/upload", strings.NewReader("data"))
+	req := httptest.NewRequest(http.MethodPost, apiOstreeUploadPath, strings.NewReader("data"))
 	rec := httptest.NewRecorder()
 	handleOstreeUpload(rec, req, filepath.Join(t.TempDir(), "missing.json"))
 	if rec.Code != http.StatusInternalServerError {
@@ -259,7 +260,7 @@ func TestHandleOstreeUploadMkdirError(t *testing.T) {
 	}
 	// upload_path lives under a regular file, so creating its dir must fail.
 	cfgPath := writeTempConfig(t, fmt.Sprintf(`{"ostree":{"upload_path":%q}}`, filepath.Join(blocker, "sub", "update.tar")))
-	req := httptest.NewRequest(http.MethodPost, "/ostree/upload", strings.NewReader("data"))
+	req := httptest.NewRequest(http.MethodPost, apiOstreeUploadPath, strings.NewReader("data"))
 	rec := httptest.NewRecorder()
 	handleOstreeUpload(rec, req, cfgPath)
 	if rec.Code != http.StatusInternalServerError {
@@ -268,7 +269,7 @@ func TestHandleOstreeUploadMkdirError(t *testing.T) {
 }
 
 func TestHandleOstreeUpgradeLoadConfigError(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPost, "/ostree/upgrade", nil)
+	req := httptest.NewRequest(http.MethodPost, apiOstreeUpgradePath, nil)
 	rec := httptest.NewRecorder()
 	handleOstreeUpgrade(rec, req, filepath.Join(t.TempDir(), "missing.json"))
 	if rec.Code != http.StatusInternalServerError {

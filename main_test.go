@@ -1082,7 +1082,7 @@ func stubServermasterStatusCollector(fn func(context.Context, string) servermast
 }
 
 func TestHandleServermasterStatusMethodNotAllowed(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPost, "/servermaster", nil)
+	req := httptest.NewRequest(http.MethodPost, apiStatusPath, nil)
 	rec := httptest.NewRecorder()
 	handleServermasterStatus(rec, req, "unused")
 	if rec.Code != http.StatusMethodNotAllowed {
@@ -1091,7 +1091,7 @@ func TestHandleServermasterStatusMethodNotAllowed(t *testing.T) {
 }
 
 // sampleServermasterStatus is a fully populated status document used to exercise
-// the /servermaster handler's encoding.
+// the /servermaster/status handler's encoding.
 func sampleServermasterStatus() servermasterStatus {
 	return servermasterStatus{
 		Status:      "ok",
@@ -1132,7 +1132,7 @@ func TestHandleServermasterStatusPrettyJSON(t *testing.T) {
 		return sampleServermasterStatus()
 	})()
 
-	req := httptest.NewRequest(http.MethodGet, "/servermaster", nil)
+	req := httptest.NewRequest(http.MethodGet, apiStatusPath, nil)
 	rec := httptest.NewRecorder()
 	handleServermasterStatus(rec, req, "unused")
 	if rec.Code != http.StatusOK {
@@ -1224,12 +1224,12 @@ func TestWriteConfigFile(t *testing.T) {
 	}
 }
 
-// validConfigUploadBody is a minimal valid /config request body shared by the
-// upload tests.
+// validConfigUploadBody is a minimal valid /servermaster/config request body
+// shared by the upload tests.
 const validConfigUploadBody = `{"containers":[{"name":"web","image":"nginx","ports":[{"host_port":8081,"container_port":80}]}]}`
 
 func TestHandleConfigUploadMethodNotAllowed(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/config", nil)
+	req := httptest.NewRequest(http.MethodGet, apiConfigPath, nil)
 	rec := httptest.NewRecorder()
 	handleConfigUpload(rec, req, "unused")
 	if rec.Code != http.StatusMethodNotAllowed {
@@ -1239,7 +1239,7 @@ func TestHandleConfigUploadMethodNotAllowed(t *testing.T) {
 
 func TestHandleConfigUploadMalformedJSON(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "containers.json")
-	req := httptest.NewRequest(http.MethodPost, "/config", strings.NewReader("{not json"))
+	req := httptest.NewRequest(http.MethodPost, apiConfigPath, strings.NewReader("{not json"))
 	rec := httptest.NewRecorder()
 	handleConfigUpload(rec, req, path)
 
@@ -1257,7 +1257,7 @@ func TestHandleConfigUploadInvalidConfig(t *testing.T) {
 	defer stubConfigApplier(func(*Config) error { applied = true; return nil })()
 
 	body := `{"firewall_ports":[{"port":"70000"}]}`
-	req := httptest.NewRequest(http.MethodPost, "/config", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, apiConfigPath, strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	handleConfigUpload(rec, req, path)
 
@@ -1280,7 +1280,7 @@ func TestHandleConfigUploadRejectionLogged(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "containers.json")
 	body := `{"interfaces":[{"name":"dummy0","ip_address":"192.168.1.10"}]}`
-	req := httptest.NewRequest(http.MethodPost, "/config", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, apiConfigPath, strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	handleConfigUpload(rec, req, path)
 
@@ -1305,7 +1305,7 @@ func TestHandleConfigUploadValid(t *testing.T) {
 	var appliedCfg *Config
 	defer stubConfigApplier(func(c *Config) error { appliedCfg = c; return nil })()
 
-	req := httptest.NewRequest(http.MethodPost, "/config", strings.NewReader(validConfigUploadBody))
+	req := httptest.NewRequest(http.MethodPost, apiConfigPath, strings.NewReader(validConfigUploadBody))
 	rec := httptest.NewRecorder()
 	handleConfigUpload(rec, req, path)
 
@@ -1328,7 +1328,7 @@ func TestHandleConfigUploadApplyFailure(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "containers.json")
 	defer stubConfigApplier(func(*Config) error { return fmt.Errorf("firewalld down") })()
 
-	req := httptest.NewRequest(http.MethodPost, "/config", strings.NewReader(validConfigUploadBody))
+	req := httptest.NewRequest(http.MethodPost, apiConfigPath, strings.NewReader(validConfigUploadBody))
 	rec := httptest.NewRecorder()
 	handleConfigUpload(rec, req, path)
 
@@ -1371,7 +1371,7 @@ func TestHandleOstreeUpload(t *testing.T) {
 	}
 
 	body := "fake-tar-contents"
-	req := httptest.NewRequest(http.MethodPost, "/ostree/upload", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, apiOstreeUploadPath, strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	handleOstreeUpload(rec, req, cfgPath)
 
@@ -1388,7 +1388,7 @@ func TestHandleOstreeUpload(t *testing.T) {
 }
 
 func TestHandleOstreeUploadMethodNotAllowed(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/ostree/upload", nil)
+	req := httptest.NewRequest(http.MethodGet, apiOstreeUploadPath, nil)
 	rec := httptest.NewRecorder()
 	handleOstreeUpload(rec, req, "unused")
 	if rec.Code != http.StatusMethodNotAllowed {
@@ -1398,7 +1398,7 @@ func TestHandleOstreeUploadMethodNotAllowed(t *testing.T) {
 
 func TestHandleOstreeUpgrade(t *testing.T) {
 	t.Run("method not allowed", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/ostree/upgrade", nil)
+		req := httptest.NewRequest(http.MethodGet, apiOstreeUpgradePath, nil)
 		rec := httptest.NewRecorder()
 		handleOstreeUpgrade(rec, req, "unused")
 		if rec.Code != http.StatusMethodNotAllowed {
@@ -1408,7 +1408,7 @@ func TestHandleOstreeUpgrade(t *testing.T) {
 
 	t.Run("no apply command", func(t *testing.T) {
 		cfgPath := writeTempConfig(t, `{}`)
-		req := httptest.NewRequest(http.MethodPost, "/ostree/upgrade", nil)
+		req := httptest.NewRequest(http.MethodPost, apiOstreeUpgradePath, nil)
 		rec := httptest.NewRecorder()
 		handleOstreeUpgrade(rec, req, cfgPath)
 		if rec.Code != http.StatusBadRequest {
@@ -1419,7 +1419,7 @@ func TestHandleOstreeUpgrade(t *testing.T) {
 	// reboot=false keeps the reboot path from firing during the test.
 	t.Run("apply succeeds without reboot", func(t *testing.T) {
 		cfgPath := writeTempConfig(t, `{"ostree":{"apply_command":["true"]}}`)
-		req := httptest.NewRequest(http.MethodPost, "/ostree/upgrade?reboot=false", nil)
+		req := httptest.NewRequest(http.MethodPost, apiOstreeUpgradePath+"?reboot=false", nil)
 		rec := httptest.NewRecorder()
 		handleOstreeUpgrade(rec, req, cfgPath)
 		if rec.Code != http.StatusOK {
@@ -1432,7 +1432,7 @@ func TestHandleOstreeUpgrade(t *testing.T) {
 
 	t.Run("apply fails", func(t *testing.T) {
 		cfgPath := writeTempConfig(t, `{"ostree":{"apply_command":["false"]}}`)
-		req := httptest.NewRequest(http.MethodPost, "/ostree/upgrade?reboot=false", nil)
+		req := httptest.NewRequest(http.MethodPost, apiOstreeUpgradePath+"?reboot=false", nil)
 		rec := httptest.NewRecorder()
 		handleOstreeUpgrade(rec, req, cfgPath)
 		if rec.Code != http.StatusInternalServerError {

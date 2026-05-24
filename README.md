@@ -96,12 +96,16 @@ Tagged GitHub releases attach prebuilt `x86_64` and `aarch64` RPMs.
 
 ## HTTP API
 
-All HTTP endpoints are unauthenticated. Expose `:8080` only on a trusted
-management network.
+All HTTP endpoints live under `/servermaster/*` and are unauthenticated. Expose
+`:8080` only on a trusted management network.
+
+### Health
+
+`GET /servermaster/health` returns a plain-text liveness response.
 
 ### Status
 
-`GET /servermaster` returns a pretty-printed JSON status document with:
+`GET /servermaster/status` returns a pretty-printed JSON status document with:
 
 - the node's current `hostname`
 - `uptime`: how long the host has been running, as whole `seconds` plus a
@@ -130,14 +134,14 @@ management network.
 - status collection errors, if any
 
 ```sh
-curl http://node:8080/servermaster
+curl http://node:8080/servermaster/status
 ```
 
 ### Remote Configuration
 
-`POST /config` and `PUT /config` accept a raw config JSON document. The service
-validates the body, writes it atomically to the active `-config` path, and
-immediately reconciles the node to the new desired state.
+`POST /servermaster/config` and `PUT /servermaster/config` accept a raw config
+JSON document. The service validates the body, writes it atomically to the active
+`-config` path, and immediately reconciles the node to the new desired state.
 
 - Malformed or invalid config is rejected with `400` and is not written.
 - Valid config is saved before apply. If apply fails, the response is `500` and
@@ -145,24 +149,26 @@ immediately reconciles the node to the new desired state.
 - Request bodies are capped at 1 MiB.
 
 ```sh
-curl -X POST --data-binary @config.json http://node:8080/config
+curl -X POST --data-binary @config.json http://node:8080/servermaster/config
 ```
 
 ### OS Updates
 
 The OS update endpoints stage and apply an ostree/bootc update tarball:
 
-- `POST /ostree/upload` streams the request body to `ostree.upload_path`. The
-  body is written to a temporary file and renamed into place after upload.
-- `POST /ostree/upgrade` runs `ostree.apply_command` and reboots the host after
-  a successful apply.
+- `POST /servermaster/ostree/upload` streams the request body to
+  `ostree.upload_path`. The body is written to a temporary file and renamed into
+  place after upload.
+- `POST /servermaster/ostree/upgrade` runs `ostree.apply_command` and reboots
+  the host after a successful apply.
 
-Pass `?reboot=false` to `/ostree/upgrade` to apply without rebooting.
-`/ostree/upgrade` returns `400` when no `apply_command` is configured.
+Pass `?reboot=false` to `/servermaster/ostree/upgrade` to apply without
+rebooting. `/servermaster/ostree/upgrade` returns `400` when no `apply_command`
+is configured.
 
 ```sh
-curl --data-binary @update.tar http://node:8080/ostree/upload
-curl -X POST http://node:8080/ostree/upgrade
+curl --data-binary @update.tar http://node:8080/servermaster/ostree/upload
+curl -X POST http://node:8080/servermaster/ostree/upgrade
 ```
 
 ## Configuration
@@ -175,7 +181,7 @@ Top-level fields:
 - `interfaces`: optional list of host interface settings
 - `firewall_ports`: optional list of firewalld ports to open
 - `containers`: list of container definitions
-- `ostree`: optional OS update settings for the `/ostree/*` endpoints
+- `ostree`: optional OS update settings for the `/servermaster/ostree/*` endpoints
 
 ### Hostname
 
@@ -190,7 +196,7 @@ reverse lookups still resolve via DNS or `/etc/hosts`, which `hostnamectl` does
 not modify. Reconcile only invokes `hostnamectl` when the declared name differs
 from the running one. Omitting `hostname` (or leaving it empty) leaves the
 host's hostname unmanaged. The current hostname is also reported in
-`/servermaster`.
+`/servermaster/status`.
 
 ### Folders
 
@@ -299,9 +305,10 @@ ports are declared it is an error, since the config cannot be satisfied.
 
 ### Ostree
 
-- `upload_path`: where `/ostree/upload` writes the uploaded image; default
-  `/data/ostree/update.tar`
-- `apply_command`: argv list run by `/ostree/upgrade` to apply the staged image
+- `upload_path`: where `/servermaster/ostree/upload` writes the uploaded image;
+  default `/data/ostree/update.tar`
+- `apply_command`: argv list run by `/servermaster/ostree/upgrade` to apply the
+  staged image
 
 Example `apply_command`:
 

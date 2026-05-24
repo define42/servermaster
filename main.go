@@ -46,19 +46,24 @@ const (
 	podmanRootfulMode       = "rootful"
 	servermasterLogTail     = 100
 	statusCommandTimeout    = 5 * time.Second
+	apiHealthPath           = "/servermaster/health"
+	apiStatusPath           = "/servermaster/status"
+	apiConfigPath           = "/servermaster/config"
+	apiOstreeUploadPath     = "/servermaster/ostree/upload"
+	apiOstreeUpgradePath    = "/servermaster/ostree/upgrade"
 
 	// nmstateApplyTimeout bounds `nmstatectl apply`'s verify-and-rollback cycle
 	// (passed as --timeout). An interface that cannot reach its desired state —
 	// for example a declared device that does not exist on the host — makes the
 	// apply roll back and fail at this deadline instead of blocking forever. The
 	// exec gets a slightly longer hard deadline (nmstateApplyTimeout + buffer) so
-	// a wedged nmstatectl cannot hang the reconcile, and the /config request that
-	// holds applyMu, indefinitely.
+	// a wedged nmstatectl cannot hang the reconcile, and the /servermaster/config
+	// request that holds applyMu, indefinitely.
 	nmstateApplyTimeout = 60 * time.Second
 
-	// maxConfigUploadBytes caps the body accepted by /config. A node config is
-	// a small JSON document; the limit stops an unauthenticated caller from
-	// streaming an arbitrarily large body into memory.
+	// maxConfigUploadBytes caps the body accepted by /servermaster/config. A node
+	// config is a small JSON document; the limit stops an unauthenticated caller
+	// from streaming an arbitrarily large body into memory.
 	maxConfigUploadBytes = 1 << 20 // 1 MiB
 
 	firewalldBusName       = "org.fedoraproject.FirewallD1"
@@ -73,8 +78,8 @@ const (
 )
 
 // applyMu serializes host convergence so the startup reconcile and concurrent
-// /config uploads cannot interleave changes to folders, interfaces, firewall,
-// or containers. Callers hold it across the whole apply.
+// /servermaster/config uploads cannot interleave changes to folders, interfaces,
+// firewall, or containers. Callers hold it across the whole apply.
 //
 //nolint:gochecknoglobals // process-wide lock guarding the single host apply.
 var applyMu sync.Mutex
@@ -85,15 +90,15 @@ var applyMu sync.Mutex
 //nolint:gochecknoglobals // injectable seam so handlers can be tested without mutating the host.
 var configApplier = applyConfig
 
-// servermasterStatusCollector gathers the /servermaster response. Tests replace
-// it so the handler can be exercised without requiring Podman or ostree.
+// servermasterStatusCollector gathers the /servermaster/status response. Tests
+// replace it so the handler can be exercised without requiring Podman or ostree.
 //
 //nolint:gochecknoglobals // injectable seam so the handler can be tested without Podman or ostree.
 var servermasterStatusCollector = collectServermasterStatus
 
-// serviceLog retains the most recent log lines in memory so the /servermaster
-// endpoint can surface them in servermaster_log. captureServiceLog tees the
-// standard logger into it at startup.
+// serviceLog retains the most recent log lines in memory so the
+// /servermaster/status endpoint can surface them in servermaster_log.
+// captureServiceLog tees the standard logger into it at startup.
 //
 //nolint:gochecknoglobals // process-wide log ring teed from the standard logger.
 var serviceLog = newLogRing(servermasterLogTail)
@@ -175,7 +180,7 @@ func (r *logRing) snapshot() []string {
 
 // captureServiceLog tees the standard logger to its existing destination and the
 // in-memory ring, so logs still reach stderr/journald while becoming queryable
-// via /servermaster.
+// via /servermaster/status.
 func captureServiceLog() {
 	log.SetOutput(io.MultiWriter(log.Writer(), serviceLog))
 }
@@ -511,7 +516,7 @@ func runService(configPath string) error {
 	// is configured with Restart=always/RestartSec=10s, so returning here
 	// would tear down and recreate every container on a tight crash loop.
 	// The web server stays up so the host remains observable. applyMu is held
-	// so an early /config upload cannot race the startup convergence.
+	// so an early /servermaster/config upload cannot race the startup convergence.
 	applyMu.Lock()
 	runErr := run(configPath)
 	applyMu.Unlock()
@@ -528,25 +533,25 @@ func runService(configPath string) error {
 
 func startWebServer(address string, configPath string) (*http.Server, <-chan error, error) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
-			http.NotFound(w, r)
+	mux.HandleFunc(apiHealthPath, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", "GET")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = fmt.Fprintln(w, "servermaster running")
 	})
-	mux.HandleFunc("/servermaster", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(apiStatusPath, func(w http.ResponseWriter, r *http.Request) {
 		handleServermasterStatus(w, r, configPath)
 	})
-	mux.HandleFunc("/config", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(apiConfigPath, func(w http.ResponseWriter, r *http.Request) {
 		handleConfigUpload(w, r, configPath)
 	})
-	mux.HandleFunc("/ostree/upload", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(apiOstreeUploadPath, func(w http.ResponseWriter, r *http.Request) {
 		handleOstreeUpload(w, r, configPath)
 	})
-	mux.HandleFunc("/ostree/upgrade", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(apiOstreeUpgradePath, func(w http.ResponseWriter, r *http.Request) {
 		handleOstreeUpgrade(w, r, configPath)
 	})
 
@@ -987,9 +992,9 @@ func cpuUsedPercent(before, after cpuTimes) float64 {
 // handleConfigUpload accepts a raw config.json document, validates it, writes
 // it atomically to the active config path, and converges the host to it (the
 // same reconcile that runs at startup). The validated body is what lands on
-// disk, so a successful upload becomes the new source of truth. Like the ostree
-// endpoints it is unauthenticated: anyone who can reach :8080 can rewrite the
-// node's folders, interfaces, firewall, and containers.
+// disk, so a successful upload becomes the new source of truth. Like the
+// /servermaster/ostree endpoints it is unauthenticated: anyone who can reach
+// :8080 can rewrite the node's folders, interfaces, firewall, and containers.
 func handleConfigUpload(w http.ResponseWriter, r *http.Request, configPath string) {
 	if r.Method != http.MethodPost && r.Method != http.MethodPut {
 		w.Header().Set("Allow", "POST, PUT")
@@ -1142,7 +1147,7 @@ func handleOstreeUpload(w http.ResponseWriter, r *http.Request, configPath strin
 // handleOstreeUpgrade runs the configured apply command and, unless the request
 // sets ?reboot=false, reboots the host once the command succeeds. The reboot is
 // scheduled after the response is written so the caller gets confirmation. Like
-// the upload endpoint this is unauthenticated.
+// the /servermaster/ostree/upload endpoint this is unauthenticated.
 func handleOstreeUpgrade(w http.ResponseWriter, r *http.Request, configPath string) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
@@ -1401,8 +1406,8 @@ func run(configPath string) error {
 // applyConfig validates the desired node configuration and converges the host
 // to it: host folders, host interfaces, firewall ports, the Podman socket, and
 // the declared containers. Callers must hold applyMu so two convergence runs
-// (the startup reconcile and a concurrent /config upload) cannot interleave
-// host changes.
+// (the startup reconcile and a concurrent /servermaster/config upload) cannot
+// interleave host changes.
 func applyConfig(cfg *Config) error {
 	if err := validateConfig(cfg); err != nil {
 		return err

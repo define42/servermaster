@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
 
 func TestSplitLogFrame(t *testing.T) {
@@ -118,7 +119,11 @@ func TestInterfaceStatistics(t *testing.T) {
 func TestInterfaceAddressesSkipsNilIPNet(t *testing.T) {
 	prev := netlinkAddrList
 	netlinkAddrList = func(netlink.Link, int) ([]netlink.Addr, error) {
-		return []netlink.Addr{{IPNet: nil}, {IPNet: cidr("10.0.0.5/24")}}, nil
+		return []netlink.Addr{
+			{IPNet: nil},
+			{IPNet: cidr("10.0.0.5/24"), Flags: unix.IFA_F_PERMANENT}, // static
+			{IPNet: cidr("10.0.0.6/24")},                              // lease-based
+		}, nil
 	}
 	defer func() { netlinkAddrList = prev }()
 
@@ -126,8 +131,35 @@ func TestInterfaceAddressesSkipsNilIPNet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("interfaceAddresses: %v", err)
 	}
-	if len(got) != 1 || got[0].IP != "10.0.0.5" {
-		t.Fatalf("addresses = %+v, want only the valid one", got)
+	if len(got) != 2 {
+		t.Fatalf("addresses = %+v, want the two with an IPNet", got)
+	}
+	if got[0].IP != "10.0.0.5" || got[0].Dynamic {
+		t.Fatalf("permanent address mismapped: %+v", got[0])
+	}
+	if !got[1].Dynamic {
+		t.Fatalf("non-permanent address should be dynamic: %+v", got[1])
+	}
+}
+
+func TestAddressingMethod(t *testing.T) {
+	cases := []struct {
+		name string
+		addr []networkAddress
+		want string
+	}{
+		{"none", nil, ""},
+		{"link-local only ignored", []networkAddress{{IP: "fe80::1"}, {IP: "127.0.0.1"}}, ""},
+		{"static global", []networkAddress{{IP: "192.168.1.10"}}, "static"},
+		{"dynamic global", []networkAddress{{IP: "192.168.1.20", Dynamic: true}}, "dhcp"},
+		{"mixed prefers dhcp", []networkAddress{{IP: "192.168.1.10"}, {IP: "2001:db8::5", Dynamic: true}}, "dhcp"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := addressingMethod(tt.addr); got != tt.want {
+				t.Fatalf("addressingMethod = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

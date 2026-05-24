@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
 
 func TestValidateContainerPort(t *testing.T) {
@@ -632,7 +633,8 @@ func testNetworkLinks() ([]netlink.Link, map[int][]netlink.Addr) {
 	}
 	addrs := map[int][]netlink.Addr{
 		2: {
-			{IPNet: cidr("192.168.1.10/24")},
+			// IFA_F_PERMANENT marks the global address as statically configured.
+			{IPNet: cidr("192.168.1.10/24"), Flags: unix.IFA_F_PERMANENT},
 			{IPNet: cidr("fe80::1/64")},
 		},
 	}
@@ -696,6 +698,9 @@ func assertEth0(t *testing.T, eth0 networkInterface) {
 	}
 	if eth0.MAC != "52:54:00:12:34:56" || eth0.MTU != 1500 || eth0.TxQueueLen != 1000 {
 		t.Fatalf("eth0 mac/mtu/txqueuelen mismatch: %+v", eth0)
+	}
+	if eth0.Addressing != "static" {
+		t.Fatalf("eth0 addressing = %q, want static (permanent global address)", eth0.Addressing)
 	}
 	if len(eth0.Addresses) != 2 {
 		t.Fatalf("eth0 addresses = %d, want 2", len(eth0.Addresses))

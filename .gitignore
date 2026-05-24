@@ -4,3 +4,5 @@
 
 # Coverage profile from `make test`
 /coverage.out
+
+test.json

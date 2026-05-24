@@ -36,6 +36,7 @@ import (
 	systemd "github.com/coreos/go-systemd/v22/dbus"
 	dbus "github.com/godbus/dbus/v5"
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -315,6 +316,7 @@ type servermasterStatus struct {
 	FreeDiskSpace   []diskStatus             `json:"free_diskspace"`
 	Memory          memoryStatus             `json:"memory"`
 	CPU             cpuStatus                `json:"cpu"`
+	Inventory       *Inventory               `json:"inventory,omitempty"`
 	Network         networkStatus            `json:"network"`
 	Containers      []runningContainerStatus `json:"containers"`
 	ServermasterLog []string                 `json:"servermaster_log"`
@@ -354,14 +356,18 @@ type networkStatus struct {
 }
 
 type networkInterface struct {
-	Name       string           `json:"name"`
-	Index      int              `json:"index"`
-	Type       string           `json:"type,omitempty"`
-	State      string           `json:"state,omitempty"`
-	MAC        string           `json:"mac_address,omitempty"`
-	MTU        int              `json:"mtu,omitempty"`
-	SpeedMbps  int              `json:"speed_mbps,omitempty"`
-	TxQueueLen int              `json:"txqueuelen"`
+	Name       string `json:"name"`
+	Index      int    `json:"index"`
+	Type       string `json:"type,omitempty"`
+	State      string `json:"state,omitempty"`
+	MAC        string `json:"mac_address,omitempty"`
+	MTU        int    `json:"mtu,omitempty"`
+	SpeedMbps  int    `json:"speed_mbps,omitempty"`
+	TxQueueLen int    `json:"txqueuelen"`
+	// Addressing summarizes how the interface's global addresses were assigned:
+	// "static", "dhcp", or "" when it has none (loopback, link-local only). It is
+	// inferred from the kernel's permanent-address flag, not the configured intent.
+	Addressing string           `json:"addressing,omitempty"`
 	Flags      []string         `json:"flags,omitempty"`
 	Addresses  []networkAddress `json:"addresses,omitempty"`
 	Statistics *interfaceStats  `json:"statistics,omitempty"`
@@ -371,6 +377,10 @@ type networkAddress struct {
 	IP           string `json:"ip"`
 	PrefixLength int    `json:"prefix_length"`
 	Family       string `json:"family"`
+	// Dynamic is true when the address is lease-based (DHCP or router
+	// advertisement) rather than a permanent, statically configured address —
+	// the same distinction `ip addr` shows as "dynamic".
+	Dynamic bool `json:"dynamic"`
 }
 
 // interfaceStats are the kernel's cumulative per-interface counters — the same
@@ -570,11 +580,7 @@ func collectServermasterStatus(ctx context.Context, configPath string) servermas
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 
-	if hostname, err := os.Hostname(); err == nil {
-		status.Hostname = hostname
-	} else {
-		status.Errors = append(status.Errors, fmt.Sprintf("hostname: %v", err))
-	}
+	collectHostnameInto(&status)
 
 	if _, err := loadConfig(configPath); err != nil {
 		status.Errors = append(status.Errors, fmt.Sprintf("load config: %v", err))
@@ -603,6 +609,8 @@ func collectServermasterStatus(ctx context.Context, configPath string) servermas
 		status.Errors = append(status.Errors, fmt.Sprintf("cpu: %s", status.CPU.Error))
 	}
 
+	collectInventoryInto(&status)
+
 	network := collectNetworkStatus(ctx)
 	if network.Error != "" {
 		status.Errors = append(status.Errors, fmt.Sprintf("network: %s", network.Error))
@@ -624,6 +632,28 @@ func collectServermasterStatus(ctx context.Context, configPath string) servermas
 	}
 
 	return status
+}
+
+// collectHostnameInto records the host's current hostname, or the failure to
+// read it, into status.
+func collectHostnameInto(status *servermasterStatus) {
+	if hostname, err := os.Hostname(); err == nil {
+		status.Hostname = hostname
+	} else {
+		status.Errors = append(status.Errors, fmt.Sprintf("hostname: %v", err))
+	}
+}
+
+// collectInventoryInto decodes the hardware inventory into status. DMI is
+// root-only and absent on some hosts, so a failure is recorded as a status error
+// and the inventory is left unset.
+func collectInventoryInto(status *servermasterStatus) {
+	inventory, err := collectInventory()
+	if err != nil {
+		status.Errors = append(status.Errors, fmt.Sprintf("inventory: %v", err))
+		return
+	}
+	status.Inventory = inventory
 }
 
 // containerStatusErrors returns one "container <name>: <error>" message for each
@@ -2934,6 +2964,7 @@ func collectNetworkStatus(ctx context.Context) networkStatus {
 			status.Error = appendStatusError(status.Error, fmt.Sprintf("addresses for %s: %v", attrs.Name, addrErr))
 		}
 		iface.Addresses = addrs
+		iface.Addressing = addressingMethod(addrs)
 
 		status.Interfaces = append(status.Interfaces, iface)
 	}
@@ -2968,9 +2999,32 @@ func interfaceAddresses(link netlink.Link) ([]networkAddress, error) {
 			IP:           addr.IP.String(),
 			PrefixLength: prefix,
 			Family:       ipFamily(addr.IP),
+			// A permanent address is statically configured; anything else is
+			// lease-based (DHCP or a router advertisement).
+			Dynamic: addr.Flags&unix.IFA_F_PERMANENT == 0,
 		})
 	}
 	return result, nil
+}
+
+// addressingMethod summarizes how an interface's global addresses were assigned:
+// "dhcp" when any is dynamic (lease-based), "static" when it has only permanent
+// global addresses, and "" when it has none (such as loopback or a link-local
+// only interface). Link-local and loopback addresses are ignored. This is a
+// heuristic from the kernel's permanent flag, not the configured intent.
+func addressingMethod(addresses []networkAddress) string {
+	method := ""
+	for _, addr := range addresses {
+		ip := net.ParseIP(addr.IP)
+		if ip == nil || !ip.IsGlobalUnicast() {
+			continue
+		}
+		if addr.Dynamic {
+			return "dhcp"
+		}
+		method = "static"
+	}
+	return method
 }
 
 // interfaceSpeed returns an interface's link speed in Mbit/s, read from sysfs.

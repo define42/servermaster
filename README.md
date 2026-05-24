@@ -111,6 +111,10 @@ management network.
 - `memory`: total, free, available, and used RAM (bytes) plus used percent
 - `cpu`: core count and current utilization percent (sampled briefly from
   `/proc/stat`)
+- `inventory`: hardware inventory decoded from DMI/SMBIOS — service tag, BIOS
+  firmware, baseboard, and populated memory modules. Reading DMI requires root
+  and a host that exposes SMBIOS; where it is unavailable the field is omitted
+  and the reason is recorded in `errors`
 - live network configuration for every host interface (read from the kernel via
   netlink: addresses, routes, link state, link speed (Mbit/s, from sysfs),
   transmit queue length, and RX/TX counters — packets, bytes, errors, dropped,

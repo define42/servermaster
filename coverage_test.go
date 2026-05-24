@@ -267,6 +267,81 @@ func TestCollectMemoryStatusErrors(t *testing.T) {
 	}
 }
 
+// --- uptime ----------------------------------------------------------------
+
+func TestReadUptimeSeconds(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "uptime")
+	if err := os.WriteFile(path, []byte("350735.47 234388.90\n"), 0o600); err != nil {
+		t.Fatalf("write uptime: %v", err)
+	}
+	seconds, err := readUptimeSeconds(path)
+	if err != nil {
+		t.Fatalf("readUptimeSeconds: %v", err)
+	}
+	if seconds != 350735 { // truncated to whole seconds, idle field ignored
+		t.Fatalf("seconds = %d, want 350735", seconds)
+	}
+
+	if _, err := readUptimeSeconds(filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Fatal("expected error reading a missing uptime file")
+	}
+
+	empty := filepath.Join(t.TempDir(), "empty")
+	if err := os.WriteFile(empty, []byte("   \n"), 0o600); err != nil {
+		t.Fatalf("write empty uptime: %v", err)
+	}
+	if _, err := readUptimeSeconds(empty); err == nil {
+		t.Fatal("expected error for empty uptime file")
+	}
+
+	bad := filepath.Join(t.TempDir(), "bad")
+	if err := os.WriteFile(bad, []byte("notanumber 1.0\n"), 0o600); err != nil {
+		t.Fatalf("write bad uptime: %v", err)
+	}
+	if _, err := readUptimeSeconds(bad); err == nil {
+		t.Fatal("expected error for unparseable uptime")
+	}
+}
+
+func TestFormatUptime(t *testing.T) {
+	cases := map[uint64]string{
+		0:                           "0s",
+		45:                          "45s",
+		90:                          "1m 30s",
+		3661:                        "1h 1m 1s",
+		90061:                       "1d 1h 1m 1s",
+		2*86400 + 3*3600 + 4*60 + 5: "2d 3h 4m 5s",
+	}
+	for seconds, want := range cases {
+		if got := formatUptime(seconds); got != want {
+			t.Errorf("formatUptime(%d) = %q, want %q", seconds, got, want)
+		}
+	}
+}
+
+func TestCollectUptimeStatus(t *testing.T) {
+	prev := procUptimePath
+	defer func() { procUptimePath = prev }()
+
+	path := filepath.Join(t.TempDir(), "uptime")
+	if err := os.WriteFile(path, []byte("3661.12 100.0\n"), 0o600); err != nil {
+		t.Fatalf("write uptime: %v", err)
+	}
+	procUptimePath = path
+	u := collectUptimeStatus()
+	if u.Error != "" {
+		t.Fatalf("unexpected error: %s", u.Error)
+	}
+	if u.Seconds != 3661 || u.Human != "1h 1m 1s" {
+		t.Fatalf("uptime = %+v", u)
+	}
+
+	procUptimePath = filepath.Join(t.TempDir(), "missing")
+	if u := collectUptimeStatus(); u.Error == "" {
+		t.Fatal("expected error when uptime is unreadable")
+	}
+}
+
 // --- cpu -------------------------------------------------------------------
 
 func TestReadCPUTimes(t *testing.T) {

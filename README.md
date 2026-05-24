@@ -104,6 +104,8 @@ management network.
 `GET /servermaster` returns a pretty-printed JSON status document with:
 
 - the node's current `hostname`
+- `uptime`: how long the host has been running, as whole `seconds` plus a
+  `human` rendering (e.g. `1d 2h 3m 4s`), read from `/proc/uptime`
 - ostree/bootc deployment information
 - free disk space, one entry per real disk-backed filesystem (tmpfs and other
   virtual filesystems are excluded; a filesystem mounted at several paths is

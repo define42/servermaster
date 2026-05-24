@@ -118,13 +118,15 @@ var nmstateStatePath = "/etc/nmstate/servermaster.yml"
 //nolint:gochecknoglobals // injectable seam so disk enumeration can be tested with a fixture.
 var procMountsPath = "/proc/mounts"
 
-// procMeminfoPath and procStatPath are the kernel's memory and CPU statistics
-// files. They are variables so tests can supply fixtures instead of live /proc.
+// procMeminfoPath, procStatPath, and procUptimePath are the kernel's memory,
+// CPU, and uptime statistics files. They are variables so tests can supply
+// fixtures instead of live /proc.
 //
-//nolint:gochecknoglobals // injectable seams so memory/CPU collection can be tested with fixtures.
+//nolint:gochecknoglobals // injectable seams so memory/CPU/uptime collection can be tested with fixtures.
 var (
 	procMeminfoPath = "/proc/meminfo"
 	procStatPath    = "/proc/stat"
+	procUptimePath  = "/proc/uptime"
 )
 
 // sysClassNetPath is the sysfs network-device tree, used to read per-interface
@@ -316,6 +318,7 @@ type servermasterStatus struct {
 	Status          string                   `json:"status"`
 	GeneratedAt     string                   `json:"generated_at"`
 	Hostname        string                   `json:"hostname,omitempty"`
+	Uptime          uptimeStatus             `json:"uptime"`
 	Ostree          ostreeStatus             `json:"ostree"`
 	FreeDiskSpace   []diskStatus             `json:"free_diskspace"`
 	Memory          memoryStatus             `json:"memory"`
@@ -345,6 +348,15 @@ type cpuStatus struct {
 	Cores       int     `json:"cores"`
 	UsedPercent float64 `json:"used_percent"`
 	Error       string  `json:"error,omitempty"`
+}
+
+// uptimeStatus is how long the host has been running, read from /proc/uptime.
+// Seconds is the machine-readable figure; Human is a "1d 2h 3m 4s" rendering of
+// the same value for convenience.
+type uptimeStatus struct {
+	Seconds uint64 `json:"seconds"`
+	Human   string `json:"human"`
+	Error   string `json:"error,omitempty"`
 }
 
 // networkStatus is the live network configuration of every host interface, read
@@ -578,6 +590,14 @@ func handleServermasterStatus(w http.ResponseWriter, r *http.Request, configPath
 	}
 }
 
+// recordError appends "prefix: msg" to the status errors when msg is non-empty,
+// the shared shape for collectors that report failures through an Error field.
+func (s *servermasterStatus) recordError(prefix, msg string) {
+	if msg != "" {
+		s.Errors = append(s.Errors, fmt.Sprintf("%s: %s", prefix, msg))
+	}
+}
+
 func collectServermasterStatus(ctx context.Context, configPath string) servermasterStatus {
 	status := servermasterStatus{
 		Status:      "ok",
@@ -604,22 +624,18 @@ func collectServermasterStatus(ctx context.Context, configPath string) servermas
 	}
 
 	status.Memory = collectMemoryStatus()
-	if status.Memory.Error != "" {
-		status.Errors = append(status.Errors, fmt.Sprintf("memory: %s", status.Memory.Error))
-	}
+	status.recordError("memory", status.Memory.Error)
 
 	status.CPU = collectCPUStatus(ctx)
-	if status.CPU.Error != "" {
-		status.Errors = append(status.Errors, fmt.Sprintf("cpu: %s", status.CPU.Error))
-	}
+	status.recordError("cpu", status.CPU.Error)
+
+	status.Uptime = collectUptimeStatus()
+	status.recordError("uptime", status.Uptime.Error)
 
 	collectInventoryInto(&status)
 
-	network := collectNetworkStatus(ctx)
-	if network.Error != "" {
-		status.Errors = append(status.Errors, fmt.Sprintf("network: %s", network.Error))
-	}
-	status.Network = network
+	status.Network = collectNetworkStatus(ctx)
+	status.recordError("network", status.Network.Error)
 
 	containers, err := collectRunningContainerStatuses(ctx, servermasterLogTail)
 	if err != nil {
@@ -833,6 +849,64 @@ func readMeminfo(path string) (map[string]uint64, error) {
 		values[key] = value
 	}
 	return values, nil
+}
+
+// collectUptimeStatus reports how long the host has been running. A read or
+// parse failure is recorded in the Error field rather than failing the whole
+// status response.
+func collectUptimeStatus() uptimeStatus {
+	seconds, err := readUptimeSeconds(procUptimePath)
+	if err != nil {
+		return uptimeStatus{Error: err.Error()}
+	}
+	return uptimeStatus{
+		Seconds: seconds,
+		Human:   formatUptime(seconds),
+	}
+}
+
+// readUptimeSeconds parses the whole-seconds host uptime from a /proc/uptime-
+// formatted file, whose first field is the uptime in seconds (the second field,
+// idle time, is ignored).
+func readUptimeSeconds(path string) (uint64, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // path is the fixed procUptimePath (overridable only by tests), not request input.
+	if err != nil {
+		return 0, fmt.Errorf("read uptime %q: %w", path, err)
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) == 0 {
+		return 0, fmt.Errorf("uptime %q was empty", path)
+	}
+	seconds, err := strconv.ParseFloat(fields[0], 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse uptime %q: %w", path, err)
+	}
+	if seconds < 0 {
+		seconds = 0
+	}
+	return uint64(seconds), nil
+}
+
+// formatUptime renders a second count as "1d 2h 3m 4s", dropping leading units
+// that are zero but always keeping seconds so the result is never empty.
+func formatUptime(seconds uint64) string {
+	days := seconds / 86400
+	hours := (seconds % 86400) / 3600
+	minutes := (seconds % 3600) / 60
+	secs := seconds % 60
+
+	parts := make([]string, 0, 4)
+	if days > 0 {
+		parts = append(parts, fmt.Sprintf("%dd", days))
+	}
+	if hours > 0 || len(parts) > 0 {
+		parts = append(parts, fmt.Sprintf("%dh", hours))
+	}
+	if minutes > 0 || len(parts) > 0 {
+		parts = append(parts, fmt.Sprintf("%dm", minutes))
+	}
+	parts = append(parts, fmt.Sprintf("%ds", secs))
+	return strings.Join(parts, " ")
 }
 
 // cpuSampleInterval is how long collectCPUStatus waits between /proc/stat reads
@@ -3187,11 +3261,13 @@ func configureHostInterfaces(interfaces []InterfaceConfig) error {
 	defer os.Remove(tmpPath) // no-op once the successful rename has moved it away
 
 	if _, err := tmp.Write(document); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return fmt.Errorf("write temp nmstate document %q failed: %w", tmpPath, err)
 	}
-	if err := tmp.Chmod(0o644); err != nil { //nolint:gosec // nmstate.service reads this file to reapply network state at boot; not secret.
-		tmp.Close()
+	// nmstate.service reads this file to reapply network state at boot; it is
+	// not secret, so widen CreateTemp's 0600 to the 0644 the unit expects.
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
 		return fmt.Errorf("chmod temp nmstate document %q failed: %w", tmpPath, err)
 	}
 	if err := tmp.Close(); err != nil {

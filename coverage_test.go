@@ -119,42 +119,70 @@ func TestCollectOstreeStatusAllFail(t *testing.T) {
 
 // --- disk ------------------------------------------------------------------
 
-func TestServermasterDiskPaths(t *testing.T) {
-	paths := servermasterDiskPaths("/etc/cfg/containers.json", &Config{Ostree: &OstreeConfig{UploadPath: "/var/lib/ostree/up.tar"}})
-	want := []string{"/", "/data", "/etc/cfg", "/var/lib/ostree"}
-	if !reflect.DeepEqual(paths, want) {
-		t.Fatalf("paths = %v, want %v", paths, want)
+func TestReadDiskMounts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mounts")
+	content := strings.Join([]string{
+		"rootfs / rootfs rw 0 0",                   // not a /dev source -> skipped
+		"/dev/vda1 / ext4 rw,relatime 0 0",         // kept
+		"tmpfs /run tmpfs rw 0 0",                  // tmpfs -> skipped
+		"proc /proc proc rw 0 0",                   // virtual -> skipped
+		`/dev/vdc1 /mnt/with\040space ext4 rw 0 0`, // kept, with an escaped space
+		"too short", // <3 fields -> skipped
+		"",
+	}, "\n")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write mounts: %v", err)
 	}
-	if got := servermasterDiskPaths("", nil); !reflect.DeepEqual(got, []string{"/", "/data"}) {
-		t.Fatalf("paths(empty) = %v", got)
-	}
-}
 
-func TestNearestExistingPath(t *testing.T) {
-	dir := t.TempDir()
-	deep := filepath.Join(dir, "does", "not", "exist")
-	if got := nearestExistingPath(deep); got != dir {
-		t.Fatalf("nearestExistingPath = %q, want %q", got, dir)
+	mounts, err := readDiskMounts(path)
+	if err != nil {
+		t.Fatalf("readDiskMounts: %v", err)
 	}
-	if got := nearestExistingPath("   "); got != "" {
-		t.Fatalf("blank path = %q, want empty", got)
+	if want := []string{"/", "/mnt/with space"}; !reflect.DeepEqual(mounts, want) {
+		t.Fatalf("mounts = %v, want %v", mounts, want)
+	}
+
+	if _, err := readDiskMounts(filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Fatal("expected error reading a missing mounts file")
 	}
 }
 
 func TestCollectDiskStatuses(t *testing.T) {
-	statuses, errs := collectDiskStatuses([]string{"/", "/", filepath.Join(t.TempDir(), "missing")})
-	if len(errs) != 0 {
-		t.Fatalf("unexpected errors: %v", errs)
+	prev := procMountsPath
+	defer func() { procMountsPath = prev }()
+
+	path := filepath.Join(t.TempDir(), "mounts")
+	content := strings.Join([]string{
+		"/dev/vda1 / ext4 rw 0 0",
+		"/dev/vda1 / ext4 rw 0 0",                  // same device -> de-duplicated
+		"tmpfs /run tmpfs rw 0 0",                  // excluded
+		"/dev/vdb1 /no/such/mount/xyz ext4 rw 0 0", // kept by filter but stat fails
+	}, "\n")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write mounts: %v", err)
 	}
-	// "/" appears twice but is de-duplicated; the missing path resolves to an
-	// existing ancestor (the temp dir), so we expect two distinct stat results.
-	if len(statuses) == 0 {
-		t.Fatalf("expected at least one disk status")
+	procMountsPath = path
+
+	statuses, errs := collectDiskStatuses()
+	if len(statuses) != 1 || statuses[0].Path != "/" {
+		t.Fatalf("statuses = %+v, want a single entry for /", statuses)
 	}
-	for _, s := range statuses {
-		if s.TotalBytes == 0 {
-			t.Fatalf("disk %q reported zero total bytes", s.Path)
-		}
+	if statuses[0].TotalBytes == 0 {
+		t.Fatal("root filesystem reported zero total bytes")
+	}
+	if len(errs) != 1 {
+		t.Fatalf("errs = %v, want one (the nonexistent mount)", errs)
+	}
+}
+
+func TestCollectDiskStatusesReadError(t *testing.T) {
+	prev := procMountsPath
+	defer func() { procMountsPath = prev }()
+	procMountsPath = filepath.Join(t.TempDir(), "missing")
+
+	statuses, errs := collectDiskStatuses()
+	if statuses != nil || len(errs) != 1 {
+		t.Fatalf("want nil statuses and one error, got %v / %v", statuses, errs)
 	}
 }
 

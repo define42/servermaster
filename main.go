@@ -110,6 +110,12 @@ var podmanSocketPath = "/run/podman/podman.sock"
 //nolint:gochecknoglobals // injectable seam so interface apply can be tested without touching /etc/nmstate.
 var nmstateStatePath = "/etc/nmstate/servermaster.yml"
 
+// procMountsPath is the kernel's mounted-filesystem table. It is a variable so
+// tests can supply a fixture instead of the live /proc/mounts.
+//
+//nolint:gochecknoglobals // injectable seam so disk enumeration can be tested with a fixture.
+var procMountsPath = "/proc/mounts"
+
 // logRing is a bounded, concurrency-safe buffer of the most recent log lines. It
 // is an io.Writer, so installing it as (part of) the standard logger's output
 // captures every log.Print* call. The standard logger writes one full record per
@@ -510,8 +516,7 @@ func collectServermasterStatus(ctx context.Context, configPath string) servermas
 		status.Errors = append(status.Errors, fmt.Sprintf("hostname: %v", err))
 	}
 
-	cfg, err := loadConfig(configPath)
-	if err != nil {
+	if _, err := loadConfig(configPath); err != nil {
 		status.Errors = append(status.Errors, fmt.Sprintf("load config: %v", err))
 	}
 
@@ -522,8 +527,7 @@ func collectServermasterStatus(ctx context.Context, configPath string) servermas
 	}
 	status.Ostree = ostree
 
-	diskPaths := servermasterDiskPaths(configPath, cfg)
-	disks, diskErrors := collectDiskStatuses(diskPaths)
+	disks, diskErrors := collectDiskStatuses()
 	status.FreeDiskSpace = disks
 	for _, err := range diskErrors {
 		status.Errors = append(status.Errors, fmt.Sprintf("disk: %v", err))
@@ -557,33 +561,33 @@ func collectServermasterStatus(ctx context.Context, configPath string) servermas
 	return status
 }
 
-func servermasterDiskPaths(configPath string, cfg *Config) []string {
-	paths := []string{"/", "/data"}
-	if configPath != "" {
-		paths = append(paths, filepath.Dir(configPath))
+// collectDiskStatuses reports free space for each real, disk-backed filesystem
+// mounted on the host. It reads the mount table, keeps only block-device mounts
+// (which excludes tmpfs and the other virtual filesystems), and de-duplicates by
+// the underlying device so a filesystem mounted at several paths — or directories
+// that merely live on the same partition — are reported once.
+func collectDiskStatuses() ([]diskStatus, []error) {
+	mounts, err := readDiskMounts(procMountsPath)
+	if err != nil {
+		return nil, []error{err}
 	}
-	if cfg != nil {
-		paths = append(paths, filepath.Dir(ostreeUploadPath(cfg)))
-	}
-	return paths
-}
 
-func collectDiskStatuses(paths []string) ([]diskStatus, []error) {
 	var statuses []diskStatus
 	var errs []error
-	seen := make(map[string]struct{})
+	seenDevice := make(map[uint64]struct{})
 
-	for _, path := range paths {
-		statPath := nearestExistingPath(path)
-		if statPath == "" {
+	for _, mountPoint := range mounts {
+		var info syscall.Stat_t
+		if err := syscall.Stat(mountPoint, &info); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", mountPoint, err))
 			continue
 		}
-		if _, exists := seen[statPath]; exists {
+		if _, ok := seenDevice[info.Dev]; ok {
 			continue
 		}
-		seen[statPath] = struct{}{}
+		seenDevice[info.Dev] = struct{}{}
 
-		status, err := diskStatusForPath(statPath)
+		status, err := diskStatusForPath(mountPoint)
 		if err != nil {
 			errs = append(errs, err)
 			continue
@@ -594,22 +598,37 @@ func collectDiskStatuses(paths []string) ([]diskStatus, []error) {
 	return statuses, errs
 }
 
-func nearestExistingPath(path string) string {
-	if strings.TrimSpace(path) == "" {
-		return ""
+// readDiskMounts returns the mount points of real, disk-backed filesystems from
+// a /proc/mounts-formatted file. Only mounts whose source is a /dev device are
+// kept, which skips tmpfs, devtmpfs, proc, sysfs, cgroup, overlay, and the other
+// virtual filesystems that are not physical disks.
+func readDiskMounts(path string) ([]string, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // path is the fixed procMountsPath (overridable only by tests), not request input.
+	if err != nil {
+		return nil, fmt.Errorf("read mounts %q: %w", path, err)
 	}
 
-	candidate := filepath.Clean(path)
-	for {
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate
+	var mounts []string
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
 		}
-		parent := filepath.Dir(candidate)
-		if parent == candidate {
-			return ""
+		if !strings.HasPrefix(fields[0], "/dev/") {
+			continue
 		}
-		candidate = parent
+		mounts = append(mounts, unescapeMountPoint(fields[1]))
 	}
+	return mounts, nil
+}
+
+// unescapeMountPoint decodes the octal escapes /proc/mounts uses for a space,
+// tab, newline, or backslash in a mount-point path.
+func unescapeMountPoint(field string) string {
+	if !strings.Contains(field, `\`) {
+		return field
+	}
+	return strings.NewReplacer(`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`).Replace(field)
 }
 
 func diskStatusForPath(path string) (diskStatus, error) {

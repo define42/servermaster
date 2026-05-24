@@ -454,6 +454,7 @@ func TestCreateSpec(t *testing.T) {
 func TestValidateConfig(t *testing.T) {
 	t.Run("valid", func(t *testing.T) {
 		cfg := &Config{
+			PodmanMode:    "rootful",
 			FirewallPorts: []FirewallPortConfig{{Zone: "public", Port: "8080", Protocol: "tcp"}},
 			Containers: []ContainerConfig{
 				{Name: "web", Image: "nginx", Ports: []PortConfig{{HostPort: 8081, ContainerPort: 80}}},
@@ -464,11 +465,22 @@ func TestValidateConfig(t *testing.T) {
 		}
 	})
 
+	t.Run("valid default podman mode", func(t *testing.T) {
+		if err := validateConfig(&Config{}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
 	errorCases := []struct {
 		name string
 		cfg  *Config
 		want string
 	}{
+		{
+			name: "rootless podman mode rejected",
+			cfg:  &Config{PodmanMode: "rootless"},
+			want: "podman_mode",
+		},
 		{
 			name: "container declares interfaces",
 			cfg: &Config{Containers: []ContainerConfig{

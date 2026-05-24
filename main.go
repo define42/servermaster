@@ -27,15 +27,12 @@ import (
 	dbus "github.com/godbus/dbus/v5"
 )
 
-type PodmanMode string
-
 const (
-	PodmanRootful  PodmanMode = "rootful"
-	PodmanRootless PodmanMode = "rootless"
-
 	defaultConfigPath       = "/data/config/containers.json"
 	webServerAddress        = ":8080"
 	defaultOstreeUploadPath = "/data/ostree/update.tar"
+	podmanRootfulMode       = "rootful"
+	podmanSocketPath        = "/run/podman/podman.sock"
 
 	// maxConfigUploadBytes caps the body accepted by /config. A node config is
 	// a small JSON document; the limit stops an unauthenticated caller from
@@ -482,11 +479,6 @@ func run(configPath string) error {
 // (the startup reconcile and a concurrent /config upload) cannot interleave
 // host changes.
 func applyConfig(cfg *Config) error {
-	mode := PodmanMode(cfg.PodmanMode)
-	if mode == "" {
-		mode = PodmanRootful
-	}
-
 	if err := validateConfig(cfg); err != nil {
 		return err
 	}
@@ -503,23 +495,18 @@ func applyConfig(cfg *Config) error {
 		return err
 	}
 
-	if err := startPodmanSocket(mode); err != nil {
+	if err := startPodmanSocket(); err != nil {
 		return err
 	}
 
-	socketPath, err := podmanSocketPath(mode)
-	if err != nil {
-		return err
-	}
-
-	if err := waitForUnixSocket(socketPath, 10*time.Second); err != nil {
+	if err := waitForUnixSocket(podmanSocketPath, 10*time.Second); err != nil {
 		return err
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	ctx, err = bindings.NewConnection(ctx, "unix:"+socketPath)
+	ctx, err := bindings.NewConnection(ctx, "unix:"+podmanSocketPath)
 	if err != nil {
 		return err
 	}
@@ -559,6 +546,10 @@ func loadConfig(path string) (*Config, error) {
 }
 
 func validateConfig(cfg *Config) error {
+	if mode := strings.TrimSpace(cfg.PodmanMode); mode != "" && mode != podmanRootfulMode {
+		return fmt.Errorf("podman_mode must be %q or empty", podmanRootfulMode)
+	}
+
 	for i, folder := range cfg.Folders {
 		folderLabel := folder.Path
 		if folderLabel == "" {
@@ -912,21 +903,10 @@ func ensurePermanentFirewallPort(conn *dbus.Conn, firewalld, config dbus.BusObje
 	return nil
 }
 
-func startPodmanSocket(mode PodmanMode) error {
+func startPodmanSocket() error {
 	ctx := context.Background()
 
-	var conn *systemd.Conn
-	var err error
-
-	switch mode {
-	case PodmanRootful:
-		conn, err = systemd.NewSystemConnectionContext(ctx)
-	case PodmanRootless:
-		conn, err = systemd.NewUserConnectionContext(ctx)
-	default:
-		return fmt.Errorf("unknown podman mode: %s", mode)
-	}
-
+	conn, err := systemd.NewSystemConnectionContext(ctx)
 	if err != nil {
 		return fmt.Errorf("connect to systemd failed: %w", err)
 	}
@@ -945,23 +925,6 @@ func startPodmanSocket(mode PodmanMode) error {
 	}
 
 	return nil
-}
-
-func podmanSocketPath(mode PodmanMode) (string, error) {
-	switch mode {
-	case PodmanRootful:
-		return "/run/podman/podman.sock", nil
-
-	case PodmanRootless:
-		runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
-		if runtimeDir == "" {
-			return "", fmt.Errorf("XDG_RUNTIME_DIR is not set")
-		}
-		return runtimeDir + "/podman/podman.sock", nil
-
-	default:
-		return "", fmt.Errorf("unknown podman mode: %s", mode)
-	}
 }
 
 func waitForUnixSocket(path string, timeout time.Duration) error {

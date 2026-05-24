@@ -10,7 +10,7 @@ It starts a small web server on port `8080`, reads a JSON config file, ensures e
 3. Ensures any declared host folders exist with the configured mode and owner.
 4. Applies any host interface configuration declared in the config file.
 5. Opens any declared firewall ports through firewalld D-Bus.
-6. Starts `podman.socket` using systemd (`rootful` or `rootless` mode).
+6. Starts the rootful `podman.socket` using systemd.
 7. Waits for the Podman Unix socket to become reachable.
 8. Stops any running containers that are not declared in the config file.
 9. Pulls each image.
@@ -93,7 +93,7 @@ curl -X POST http://node:8080/ostree/upgrade
 
 Top-level fields in the JSON file:
 
-- `podman_mode`: `rootful` (default) or `rootless`
+- `podman_mode`: optional; only `rootful` is supported, and omitting it uses rootful mode
 - `folders`: optional list of host folders to create before containers start
 - `interfaces`: optional list of host network interface settings
 - `firewall_ports`: optional list of firewalld runtime ports to open

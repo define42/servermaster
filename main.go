@@ -629,20 +629,26 @@ func handleConfigUpload(w http.ResponseWriter, r *http.Request, configPath strin
 
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxConfigUploadBytes))
 	if err != nil {
-		http.Error(w, fmt.Sprintf("read config: %v", err), http.StatusBadRequest)
+		msg := fmt.Sprintf("read config: %v", err)
+		log.Printf("config upload rejected: %s", msg)
+		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
 
 	var cfg Config
 	if err := json.Unmarshal(body, &cfg); err != nil {
-		http.Error(w, fmt.Sprintf("parse config: %v", err), http.StatusBadRequest)
+		msg := fmt.Sprintf("parse config: %v", err)
+		log.Printf("config upload rejected: %s", msg)
+		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
 
 	// Validate before touching disk so a rejected upload never replaces the
 	// config on disk and never partially applies.
 	if err := validateConfig(&cfg); err != nil {
-		http.Error(w, fmt.Sprintf("invalid config: %v", err), http.StatusBadRequest)
+		msg := fmt.Sprintf("invalid config: %v", err)
+		log.Printf("config upload rejected: %s", msg)
+		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
 
@@ -652,7 +658,9 @@ func handleConfigUpload(w http.ResponseWriter, r *http.Request, configPath strin
 	defer applyMu.Unlock()
 
 	if err := writeConfigFile(configPath, body); err != nil {
-		http.Error(w, fmt.Sprintf("save config: %v", err), http.StatusInternalServerError)
+		msg := fmt.Sprintf("save config: %v", err)
+		log.Printf("config upload failed: %s", msg)
+		http.Error(w, msg, http.StatusInternalServerError)
 		return
 	}
 

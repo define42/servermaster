@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1250,6 +1251,34 @@ func TestHandleConfigUpload(t *testing.T) {
 		}
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("invalid config must not be written")
+		}
+	})
+
+	t.Run("rejection is logged so it reaches servermaster_log", func(t *testing.T) {
+		ring := newLogRing(servermasterLogTail)
+		orig := log.Writer()
+		log.SetOutput(ring)
+		defer log.SetOutput(orig)
+
+		path := filepath.Join(t.TempDir(), "containers.json")
+		body := `{"interfaces":[{"name":"dummy0","ip_address":"192.168.1.10"}]}`
+		req := httptest.NewRequest(http.MethodPost, "/config", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		handleConfigUpload(rec, req, path)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+		}
+
+		found := false
+		for _, line := range ring.snapshot() {
+			if strings.Contains(line, "invalid config") && strings.Contains(line, "dummy0") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("rejection was not logged; ring = %v", ring.snapshot())
 		}
 	})
 

@@ -1269,6 +1269,19 @@ func parseGroup(value string) (int, error) {
 // cleanup so no undeclared port is left open. firewalld *services* (for example
 // ssh, cockpit) are not ports and are intentionally left untouched.
 func configureFirewallPorts(ports []FirewallPortConfig) error {
+	// firewalld owns its D-Bus name only while running and is not D-Bus
+	// activatable on a default install, so bring it up before talking to it.
+	// firewalld is an optional (Recommends) dependency: if it cannot be started
+	// and no ports are declared there is nothing to enforce, so skip; if ports
+	// are declared the config cannot be satisfied, so fail.
+	if err := ensureFirewalldRunning(); err != nil {
+		if len(ports) == 0 {
+			log.Printf("skipping firewall reconcile, firewalld unavailable: %v", err)
+			return nil
+		}
+		return err
+	}
+
 	conn, err := dbus.ConnectSystemBus()
 	if err != nil {
 		return fmt.Errorf("connect to system bus failed: %w", err)
@@ -1480,6 +1493,35 @@ func startPodmanSocket() error {
 	result := <-ch
 	if result != "done" {
 		return fmt.Errorf("podman.socket start result: %s", result)
+	}
+
+	return nil
+}
+
+// ensureFirewalldRunning starts firewalld.service through systemd so its D-Bus
+// name is owned before ports are configured; on a host where firewalld is merely
+// stopped this makes the apply self-healing instead of failing with "name is not
+// activatable". firewalld.service is Type=dbus, so a "done" job result means the
+// bus name has been acquired, and starting an already-active unit is a no-op. An
+// error means firewalld is absent, masked, or failed to start.
+func ensureFirewalldRunning() error {
+	ctx := context.Background()
+
+	conn, err := systemd.NewSystemConnectionContext(ctx)
+	if err != nil {
+		return fmt.Errorf("connect to systemd failed: %w", err)
+	}
+	defer conn.Close()
+
+	ch := make(chan string, 1)
+
+	if _, err := conn.StartUnitContext(ctx, "firewalld.service", "replace", ch); err != nil {
+		return fmt.Errorf("start firewalld.service failed: %w", err)
+	}
+
+	result := <-ch
+	if result != "done" {
+		return fmt.Errorf("firewalld.service start result: %s", result)
 	}
 
 	return nil

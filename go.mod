@@ -6,16 +6,20 @@ require (
 	github.com/containers/podman/v5 v5.8.2
 	github.com/coreos/go-systemd/v22 v22.7.0
 	github.com/godbus/dbus/v5 v5.2.2
+	github.com/google/rpmpack v0.7.1
 )
 
 require (
 	github.com/BurntSushi/toml v1.5.0 // indirect
 	github.com/blang/semver/v4 v4.0.0 // indirect
+	github.com/cavaliergopher/cpio v1.0.1 // indirect
 	github.com/cyphar/filepath-securejoin v0.5.2 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	github.com/kevinburke/ssh_config v1.4.0 // indirect
+	github.com/klauspost/compress v1.18.0 // indirect
+	github.com/klauspost/pgzip v1.2.6 // indirect
 	github.com/kr/fs v0.1.0 // indirect
 	github.com/moby/sys/capability v0.4.0 // indirect
 	github.com/moby/sys/mountinfo v0.7.2 // indirect
@@ -28,6 +32,7 @@ require (
 	github.com/pkg/sftp v1.13.9 // indirect
 	github.com/sirupsen/logrus v1.9.4 // indirect
 	github.com/skeema/knownhosts v1.3.2 // indirect
+	github.com/ulikunitz/xz v0.5.15 // indirect
 	go.podman.io/common v0.67.1 // indirect
 	go.podman.io/storage v1.62.0 // indirect
 	golang.org/x/crypto v0.52.0 // indirect

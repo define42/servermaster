@@ -25,15 +25,40 @@ servermaster -config /data/config/containers.json
 
 If `-config` is omitted, it defaults to `/data/config/containers.json`.
 
-To install and start the systemd service:
+### Running as a service
+
+A systemd unit ships in this repo as [`servermaster.service`](servermaster.service). It runs `/usr/bin/servermaster -config /data/config/containers.json` as `root` and stays running as the web server on port `8080`.
+
+For a manual install, place the binary at `/usr/bin/servermaster` (the path the unit expects), then install and enable the unit:
 
 ```sh
-servermaster -install-service -config /data/config/containers.json
+make build
+sudo install -m 0755 dist/servermaster /usr/bin/servermaster
+sudo install -m 0644 servermaster.service /etc/systemd/system/servermaster.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now servermaster.service
 ```
 
-This writes `/etc/systemd/system/servermaster.service`, enables it, and starts it.
-The unit runs `/usr/local/bin/servermaster -config ...` as `root`.
-The process stays running as the web server on port `8080`.
+On image-mode hosts (for example Red Hat Device Edge built from a blueprint), don't install at runtime — build the RPM (below), bake it into the image, and enable the unit declaratively:
+
+```toml
+[customizations.services]
+enabled = ["servermaster.service"]
+```
+
+### Building an RPM
+
+`make rpm` builds a static (CGO-free) binary and packages it with the systemd unit and license into an RPM under `dist/`. Packaging uses the pure-Go [`cmd/mkrpm`](cmd/mkrpm), so the build host needs **no** `rpmbuild` or spec file — only the Go toolchain. The RPM installs `servermaster` to `/usr/bin` and the unit to `/usr/lib/systemd/system`, declares `Requires: podman, nmstate` (`Recommends: firewalld`), and reloads/restarts the service through systemd scriptlets.
+
+```sh
+make rpm                       # version from the latest git tag, or 0.0.0 if untagged
+make rpm VERSION=1.2.3         # explicit version
+make rpm GOARCH=arm64          # cross-build for aarch64 edge devices
+```
+
+Tagged releases on GitHub attach prebuilt `x86_64` and `aarch64` RPMs, so for a release you can download the package directly instead of building it.
+
+Add the resulting package to an image builder blueprint (`[[packages]]` from a custom repo) and enable the service as shown above.
 
 ## OS updates
 

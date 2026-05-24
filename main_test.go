@@ -631,23 +631,3 @@ func TestHandleOstreeUpgrade(t *testing.T) {
 		}
 	})
 }
-
-func TestSystemdQuoteArg(t *testing.T) {
-	tests := []struct {
-		name string
-		arg  string
-		want string
-	}{
-		{"plain path", "/data/config/containers.json", `"/data/config/containers.json"`},
-		{"escapes percent", "a%b", `"a%%b"`},
-		{"escapes quotes", `a"b`, `"a\"b"`},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := systemdQuoteArg(tt.arg); got != tt.want {
-				t.Fatalf("systemdQuoteArg(%q) = %q, want %q", tt.arg, got, tt.want)
-			}
-		})
-	}
-}

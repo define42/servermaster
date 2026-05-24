@@ -41,9 +41,6 @@ const (
 	// nmstate.service reapply it at boot in addition to the apply call below.
 	nmstateStatePath = "/etc/nmstate/servermaster.yml"
 
-	serviceName       = "servermaster.service"
-	serviceBinaryPath = "/usr/local/bin/servermaster"
-
 	firewalldBusName       = "org.fedoraproject.FirewallD1"
 	firewalldObjectPath    = "/org/fedoraproject/FirewallD1"
 	firewalldZoneInterface = "org.fedoraproject.FirewallD1.zone"
@@ -159,16 +156,7 @@ type listedContainer struct {
 
 func main() {
 	configPath := flag.String("config", defaultConfigPath, "path to config JSON file")
-	installServiceFlag := flag.Bool("install-service", false, "install and start the systemd service")
 	flag.Parse()
-
-	if *installServiceFlag {
-		if err := installService(*configPath); err != nil {
-			log.Fatal(err)
-		}
-		log.Printf("installed and started %s", serviceName)
-		return
-	}
 
 	if err := runService(*configPath); err != nil {
 		log.Fatal(err)
@@ -495,68 +483,6 @@ func validateContainerPort(port int) error {
 	}
 
 	return nil
-}
-
-func installService(configPath string) error {
-	unitPath := filepath.Join("/etc/systemd/system", serviceName)
-
-	if err := os.WriteFile(unitPath, []byte(serviceContent(configPath)), 0o644); err != nil {
-		return fmt.Errorf("write unit file: %w", err)
-	}
-
-	ctx := context.Background()
-
-	conn, err := systemd.NewSystemConnectionContext(ctx)
-	if err != nil {
-		return fmt.Errorf("connect to systemd: %w", err)
-	}
-	defer conn.Close()
-
-	if err := conn.ReloadContext(ctx); err != nil {
-		return fmt.Errorf("systemd daemon-reload failed: %w", err)
-	}
-
-	_, _, err = conn.EnableUnitFilesContext(ctx, []string{serviceName}, false, true)
-	if err != nil {
-		return fmt.Errorf("enable unit failed: %w", err)
-	}
-
-	ch := make(chan string, 1)
-	_, err = conn.StartUnitContext(ctx, serviceName, "replace", ch)
-	if err != nil {
-		return fmt.Errorf("start unit failed: %w", err)
-	}
-
-	result := <-ch
-	if result != "done" {
-		return fmt.Errorf("start unit result: %s", result)
-	}
-
-	return nil
-}
-
-func serviceContent(configPath string) string {
-	return fmt.Sprintf(`[Unit]
-Description=Servermaster Node Configuration Service
-After=network-online.target podman.socket firewalld.service
-Wants=network-online.target
-Requires=podman.socket
-
-[Service]
-Type=simple
-ExecStart=%s -config %s
-Restart=always
-RestartSec=10s
-User=root
-Group=root
-
-[Install]
-WantedBy=multi-user.target
-`, serviceBinaryPath, systemdQuoteArg(configPath))
-}
-
-func systemdQuoteArg(arg string) string {
-	return strconv.Quote(strings.ReplaceAll(arg, "%", "%%"))
 }
 
 func validateFirewallPort(port string) error {

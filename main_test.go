@@ -577,8 +577,11 @@ func TestBuildNMStateErrors(t *testing.T) {
 		{"address outside subnet", InterfaceConfig{Name: "eth0", IPAddress: "10.1.0.1", Subnet: "10.0.0.0/24"}},
 		{"bad gateway", InterfaceConfig{Name: "eth0", Gateway: "not-an-ip"}},
 		{"bad dns", InterfaceConfig{Name: "eth0", DNS: []string{"not-an-ip"}}},
+		{"negative txqueuelen", InterfaceConfig{Name: "eth0", TxQueueLen: intPtr(-1)}},
 	})
 }
+
+func intPtr(n int) *int { return &n }
 
 // device builds a fake netlink link for tests. netlink.Device.Type() reports
 // "device", matching what LinkList returns for a physical interface.

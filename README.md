@@ -244,6 +244,10 @@ list.
 - `subnet`: subnet CIDR for the host interface
 - `gateway`: default gateway IP for the host interface
 - `dns`: DNS server list for the host interface
+- `txqueuelen`: optional transmit queue length (`0`–`4294967295`). nmstate has no
+  field for it, so it is applied via netlink after the nmstate apply and
+  reapplied on each reconcile; omitting it leaves the interface's queue length
+  untouched
 - `vlan`: required when `type` is `vlan`; the VLAN settings:
   - `base_interface`: the interface the VLAN rides on, for example `eth0`
   - `id`: the 802.1Q VLAN tag, `1`–`4094`

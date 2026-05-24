@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -11,6 +12,51 @@ import (
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
+
+func TestApplyTxQueueLengths(t *testing.T) {
+	prevByName, prevSet := netlinkLinkByName, netlinkLinkSetTxQLen
+	defer func() { netlinkLinkByName, netlinkLinkSetTxQLen = prevByName, prevSet }()
+
+	var gotName string
+	var gotQLen int
+	netlinkLinkByName = func(name string) (netlink.Link, error) {
+		gotName = name
+		return &netlink.Device{LinkAttrs: netlink.LinkAttrs{Name: name}}, nil
+	}
+	netlinkLinkSetTxQLen = func(_ netlink.Link, qlen int) error {
+		gotQLen = qlen
+		return nil
+	}
+
+	if err := applyTxQueueLengths([]InterfaceConfig{
+		{Name: "eth0", TxQueueLen: intPtr(5000)},
+		{Name: "eth1"}, // no txqueuelen -> skipped
+	}); err != nil {
+		t.Fatalf("applyTxQueueLengths: %v", err)
+	}
+	if gotName != "eth0" || gotQLen != 5000 {
+		t.Fatalf("set txqueuelen on %q to %d, want eth0/5000", gotName, gotQLen)
+	}
+}
+
+func TestApplyTxQueueLengthsErrors(t *testing.T) {
+	prevByName, prevSet := netlinkLinkByName, netlinkLinkSetTxQLen
+	defer func() { netlinkLinkByName, netlinkLinkSetTxQLen = prevByName, prevSet }()
+
+	ifaces := []InterfaceConfig{{Name: "eth0", TxQueueLen: intPtr(1000)}}
+
+	netlinkLinkByName = func(string) (netlink.Link, error) { return nil, errors.New("no such link") }
+	netlinkLinkSetTxQLen = func(netlink.Link, int) error { return nil }
+	if err := applyTxQueueLengths(ifaces); err == nil {
+		t.Fatal("expected error when the link cannot be found")
+	}
+
+	netlinkLinkByName = func(string) (netlink.Link, error) { return &netlink.Device{}, nil }
+	netlinkLinkSetTxQLen = func(netlink.Link, int) error { return errors.New("set failed") }
+	if err := applyTxQueueLengths(ifaces); err == nil {
+		t.Fatal("expected error when setting txqueuelen fails")
+	}
+}
 
 func TestSplitLogFrame(t *testing.T) {
 	if got := splitLogFrame(""); got != nil {

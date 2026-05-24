@@ -221,13 +221,17 @@ type ContainerConfig struct {
 }
 
 type InterfaceConfig struct {
-	Name      string      `json:"name"`
-	Type      string      `json:"type"`
-	IPAddress string      `json:"ip_address"`
-	Subnet    string      `json:"subnet"`
-	Gateway   string      `json:"gateway"`
-	DNS       []string    `json:"dns"`
-	VLAN      *VLANConfig `json:"vlan,omitempty"`
+	Name      string   `json:"name"`
+	Type      string   `json:"type"`
+	IPAddress string   `json:"ip_address"`
+	Subnet    string   `json:"subnet"`
+	Gateway   string   `json:"gateway"`
+	DNS       []string `json:"dns"`
+	// TxQueueLen, when set, is the transmit queue length applied to the interface
+	// (the txqueuelen `ip link` reports). nmstate has no field for it, so it is
+	// applied via netlink after the nmstate apply. A nil value leaves it untouched.
+	TxQueueLen *int        `json:"txqueuelen,omitempty"`
+	VLAN       *VLANConfig `json:"vlan,omitempty"`
 }
 
 // VLANConfig describes an 802.1Q VLAN interface (type "vlan"): the VLAN rides on
@@ -2915,10 +2919,12 @@ type nmDNSConfig struct {
 //
 //nolint:gochecknoglobals // injectable seams so network status can be tested without a live kernel.
 var (
-	netlinkLinkList  = netlink.LinkList
-	netlinkAddrList  = netlink.AddrList
-	netlinkRouteList = netlink.RouteList
-	resolvConfPath   = "/etc/resolv.conf"
+	netlinkLinkList      = netlink.LinkList
+	netlinkAddrList      = netlink.AddrList
+	netlinkRouteList     = netlink.RouteList
+	netlinkLinkByName    = netlink.LinkByName
+	netlinkLinkSetTxQLen = netlink.LinkSetTxQLen
+	resolvConfPath       = "/etc/resolv.conf"
 )
 
 // collectNetworkStatus reads the live network configuration of every host
@@ -3174,6 +3180,28 @@ func configureHostInterfaces(interfaces []InterfaceConfig) error {
 		return fmt.Errorf("apply host interface configuration failed: %w", err)
 	}
 
+	// nmstate has no transmit-queue-length field, so apply it through netlink
+	// once the interfaces exist. The startup reconcile re-applies it on boot.
+	return applyTxQueueLengths(interfaces)
+}
+
+// applyTxQueueLengths sets the transmit queue length on each interface that
+// declares one (txqueuelen), looking the link up by name and setting it via
+// netlink.
+func applyTxQueueLengths(interfaces []InterfaceConfig) error {
+	for _, iface := range interfaces {
+		if iface.TxQueueLen == nil {
+			continue
+		}
+		link, err := netlinkLinkByName(iface.Name)
+		if err != nil {
+			return fmt.Errorf("look up interface %q to set txqueuelen: %w", iface.Name, err)
+		}
+		if err := netlinkLinkSetTxQLen(link, *iface.TxQueueLen); err != nil {
+			return fmt.Errorf("set txqueuelen for interface %q: %w", iface.Name, err)
+		}
+		log.Printf("set txqueuelen %d on interface %s", *iface.TxQueueLen, iface.Name)
+	}
 	return nil
 }
 
@@ -3223,9 +3251,29 @@ func buildNMState(interfaces []InterfaceConfig) (*nmState, error) {
 // buildNMInterface translates one InterfaceConfig into an nmstate interface,
 // validating its name, paired ip_address/subnet, optional VLAN settings, and
 // (when set) its static address.
+// maxTxQueueLen is the largest accepted transmit queue length: the kernel's
+// tx_queue_len is a 32-bit unsigned value.
+const maxTxQueueLen = 0xFFFFFFFF
+
+// validateTxQueueLen checks a declared txqueuelen is within the kernel's range.
+// A nil value (unset) is valid and leaves the queue length untouched.
+func validateTxQueueLen(iface InterfaceConfig, label string) error {
+	if iface.TxQueueLen == nil {
+		return nil
+	}
+	if *iface.TxQueueLen < 0 || *iface.TxQueueLen > maxTxQueueLen {
+		return fmt.Errorf("host interface %s txqueuelen %d must be between 0 and %d", label, *iface.TxQueueLen, maxTxQueueLen)
+	}
+	return nil
+}
+
 func buildNMInterface(iface InterfaceConfig, label string) (nmInterface, error) {
 	if iface.Name == "" {
 		return nmInterface{}, fmt.Errorf("host interface %s is missing name", label)
+	}
+
+	if err := validateTxQueueLen(iface, label); err != nil {
+		return nmInterface{}, err
 	}
 
 	if (iface.IPAddress == "") != (iface.Subnet == "") {

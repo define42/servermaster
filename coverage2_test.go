@@ -154,6 +154,56 @@ func TestValidateConfigOwnerErrors(t *testing.T) {
 	})
 }
 
+func TestValidateHostname(t *testing.T) {
+	valid := []string{"", "node1", "node-1", "edge.example.com", strings.Repeat("a", 63)}
+	for _, h := range valid {
+		if err := validateHostname(h); err != nil {
+			t.Fatalf("validateHostname(%q) = %v, want nil", h, err)
+		}
+	}
+	invalid := []string{"-bad", "bad-", "node_1", "a..b", strings.Repeat("a", 64), strings.Repeat("a.", 130) + "a"}
+	for _, h := range invalid {
+		if err := validateHostname(h); err == nil {
+			t.Fatalf("validateHostname(%q) = nil, want error", h)
+		}
+	}
+}
+
+func TestValidateConfigRejectsBadHostname(t *testing.T) {
+	assertValidateConfigErrors(t, []validateConfigCase{
+		{name: "bad hostname", cfg: &Config{Hostname: "bad_host"}, want: "hostname"},
+	})
+}
+
+func TestEnsureHostname(t *testing.T) {
+	if err := ensureHostname(""); err != nil {
+		t.Fatalf("empty hostname must be a no-op: %v", err)
+	}
+
+	// A hostname equal to the running one is a no-op and never shells out, so
+	// this is safe before the hostnamectl stub is installed.
+	current, err := os.Hostname()
+	if err != nil {
+		t.Fatalf("os.Hostname: %v", err)
+	}
+	if err := ensureHostname(current); err != nil {
+		t.Fatalf("hostname equal to current must be a no-op: %v", err)
+	}
+
+	// A different hostname runs hostnamectl, stubbed so the real host is untouched.
+	fakeCommand(t, "hostnamectl", "exit 0")
+	if err := ensureHostname("servermaster-coverage-host"); err != nil {
+		t.Fatalf("ensureHostname: %v", err)
+	}
+}
+
+func TestEnsureHostnameApplyError(t *testing.T) {
+	fakeCommand(t, "hostnamectl", "echo nope >&2; exit 1")
+	if err := ensureHostname("servermaster-coverage-host"); err == nil {
+		t.Fatal("expected error when hostnamectl fails")
+	}
+}
+
 func TestWriteConfigFileMkdirError(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "afile")
 	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {

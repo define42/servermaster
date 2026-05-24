@@ -103,6 +103,7 @@ management network.
 
 `GET /servermaster` returns a pretty-printed JSON status document with:
 
+- the node's current `hostname`
 - ostree/bootc deployment information
 - free disk space
 - live network configuration for every host interface (read from the kernel via
@@ -156,11 +157,27 @@ curl -X POST http://node:8080/ostree/upgrade
 Top-level fields:
 
 - `podman_mode`: optional; only `rootful` is supported, and omitted uses rootful
+- `hostname`: optional static hostname for the node (see [Hostname](#hostname))
 - `folders`: optional list of host folders to create
 - `interfaces`: optional list of host interface settings
 - `firewall_ports`: optional list of firewalld ports to open
 - `containers`: list of container definitions
 - `ostree`: optional OS update settings for the `/ostree/*` endpoints
+
+### Hostname
+
+`hostname` sets the node's static hostname via `hostnamectl set-hostname`, which
+writes `/etc/hostname` and updates the running hostname through
+systemd-hostnamed, so the change persists across reboots. It must be a valid
+RFC 1123 hostname: dot-separated labels of letters, digits, and hyphens, each
+1-63 characters and not starting or ending with a hyphen, up to 253 characters
+total. A full FQDN such as `node1.example.com` is accepted and becomes the
+static hostname (the Red Hat-native convention); note that `hostname -f` and
+reverse lookups still resolve via DNS or `/etc/hosts`, which `hostnamectl` does
+not modify. Reconcile only invokes `hostnamectl` when the declared name differs
+from the running one. Omitting `hostname` (or leaving it empty) leaves the
+host's hostname unmanaged. The current hostname is also reported in
+`/servermaster`.
 
 ### Folders
 

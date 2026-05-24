@@ -1,5 +1,6 @@
 {
   "podman_mode": "rootful",
+  "hostname": "node1.example.com",
   "folders": [
     {
       "path": "/data/web",

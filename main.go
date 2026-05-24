@@ -157,6 +157,7 @@ func captureServiceLog() {
 
 type Config struct {
 	PodmanMode    string               `json:"podman_mode"`
+	Hostname      string               `json:"hostname"`
 	Folders       []FolderConfig       `json:"folders"`
 	Files         []FileConfig         `json:"files"`
 	Interfaces    []InterfaceConfig    `json:"interfaces"`
@@ -287,6 +288,7 @@ type listedContainer struct {
 type servermasterStatus struct {
 	Status          string                   `json:"status"`
 	GeneratedAt     string                   `json:"generated_at"`
+	Hostname        string                   `json:"hostname,omitempty"`
 	Ostree          ostreeStatus             `json:"ostree"`
 	FreeDiskSpace   []diskStatus             `json:"free_diskspace"`
 	Network         networkStatus            `json:"network"`
@@ -500,6 +502,12 @@ func collectServermasterStatus(ctx context.Context, configPath string) servermas
 	status := servermasterStatus{
 		Status:      "ok",
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	if hostname, err := os.Hostname(); err == nil {
+		status.Hostname = hostname
+	} else {
+		status.Errors = append(status.Errors, fmt.Sprintf("hostname: %v", err))
 	}
 
 	cfg, err := loadConfig(configPath)
@@ -1058,6 +1066,10 @@ func applyConfig(cfg *Config) error {
 		return err
 	}
 
+	if err := ensureHostname(cfg.Hostname); err != nil {
+		return err
+	}
+
 	if err := ensureFolders(cfg.Folders); err != nil {
 		return err
 	}
@@ -1110,6 +1122,47 @@ func applyConfig(cfg *Config) error {
 	return nil
 }
 
+// validateHostname checks a declared hostname against RFC 1123: a dot-separated
+// series of labels of letters, digits, and hyphens, each 1-63 characters and not
+// hyphen-bounded, totalling at most 253 characters. An empty hostname is valid
+// and means the host's hostname is left unmanaged.
+func validateHostname(hostname string) error {
+	if hostname == "" {
+		return nil
+	}
+	if len(hostname) > 253 {
+		return fmt.Errorf("hostname %q exceeds 253 characters", hostname)
+	}
+	for _, label := range strings.Split(hostname, ".") {
+		if err := validateHostnameLabel(label); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateHostnameLabel(label string) error {
+	if label == "" {
+		return fmt.Errorf("hostname has an empty label")
+	}
+	if len(label) > 63 {
+		return fmt.Errorf("hostname label %q exceeds 63 characters", label)
+	}
+	if strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+		return fmt.Errorf("hostname label %q must not start or end with a hyphen", label)
+	}
+	for _, r := range label {
+		if !isHostnameChar(r) {
+			return fmt.Errorf("hostname label %q contains an invalid character", label)
+		}
+	}
+	return nil
+}
+
+func isHostnameChar(r rune) bool {
+	return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-'
+}
+
 func loadConfig(path string) (*Config, error) {
 	raw, err := os.ReadFile(path) //nolint:gosec // path is the operator-supplied config location, not attacker input.
 	if err != nil {
@@ -1127,6 +1180,9 @@ func loadConfig(path string) (*Config, error) {
 func validateConfig(cfg *Config) error {
 	if mode := strings.TrimSpace(cfg.PodmanMode); mode != "" && mode != podmanRootfulMode {
 		return fmt.Errorf("podman_mode must be %q or empty", podmanRootfulMode)
+	}
+	if err := validateHostname(cfg.Hostname); err != nil {
+		return err
 	}
 	if err := validateFolders(cfg.Folders); err != nil {
 		return err
@@ -1311,6 +1367,32 @@ func validateFirewallProtocol(protocol string) error {
 	default:
 		return fmt.Errorf("protocol must be tcp, udp, sctp, or dccp")
 	}
+}
+
+// ensureHostname sets the node's static hostname through hostnamectl when one is
+// declared and it differs from the running hostname. hostnamectl writes
+// /etc/hostname and updates the live hostname via systemd-hostnamed, so the
+// change persists across reboots. An empty hostname leaves it unmanaged.
+func ensureHostname(hostname string) error {
+	hostname = strings.TrimSpace(hostname)
+	if hostname == "" {
+		return nil
+	}
+
+	current, err := os.Hostname()
+	if err != nil {
+		return fmt.Errorf("read current hostname failed: %w", err)
+	}
+	if current == hostname {
+		return nil
+	}
+
+	if err := runCommand("hostnamectl", "set-hostname", hostname); err != nil {
+		return fmt.Errorf("set hostname to %q failed: %w", hostname, err)
+	}
+
+	log.Printf("hostname set to %s", hostname)
+	return nil
 }
 
 func ensureFolders(folders []FolderConfig) error {

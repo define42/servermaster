@@ -663,6 +663,90 @@ func TestCreateSpec(t *testing.T) {
 	}
 }
 
+func TestConfigHash(t *testing.T) {
+	base := ContainerConfig{
+		Name:  "web",
+		Image: "docker.io/library/nginx:1.25",
+		Env:   map[string]string{"A": "1", "B": "2"},
+		Ports: []PortConfig{{HostPort: 8081, ContainerPort: 80}},
+	}
+
+	if configHash(base) != configHash(base) {
+		t.Fatal("hash is not stable for identical config")
+	}
+
+	// Map ordering must not affect the hash (Go marshals map keys sorted).
+	reordered := base
+	reordered.Env = map[string]string{"B": "2", "A": "1"}
+	if configHash(base) != configHash(reordered) {
+		t.Fatal("hash changed when only map literal order differed")
+	}
+
+	changes := map[string]ContainerConfig{
+		"image":   {Name: "web", Image: "docker.io/library/nginx:1.26"},
+		"env":     {Name: "web", Image: "docker.io/library/nginx:1.25", Env: map[string]string{"A": "1", "B": "3"}},
+		"command": {Name: "web", Image: "docker.io/library/nginx:1.25", Command: []string{"sleep", "1"}},
+		"restart": {Name: "web", Image: "docker.io/library/nginx:1.25", Restart: "always"},
+	}
+	for name, changed := range changes {
+		if configHash(base) == configHash(changed) {
+			t.Fatalf("hash did not change when %s changed", name)
+		}
+	}
+}
+
+func TestContainerUpToDate(t *testing.T) {
+	const hash = "abc123"
+
+	running := containerInspectResponse{
+		State:  &containerInspectState{Running: true, Status: "running"},
+		Config: &containerInspectConfig{Labels: map[string]string{configHashLabel: hash}},
+	}
+	if !containerUpToDate(running, hash) {
+		t.Fatal("running container with matching hash should be up to date")
+	}
+
+	tests := []struct {
+		name    string
+		inspect containerInspectResponse
+		hash    string
+	}{
+		{
+			name:    "hash differs",
+			inspect: running,
+			hash:    "different",
+		},
+		{
+			name: "not running",
+			inspect: containerInspectResponse{
+				State:  &containerInspectState{Running: false, Status: "exited"},
+				Config: &containerInspectConfig{Labels: map[string]string{configHashLabel: hash}},
+			},
+			hash: hash,
+		},
+		{
+			name: "missing label",
+			inspect: containerInspectResponse{
+				State:  &containerInspectState{Running: true},
+				Config: &containerInspectConfig{Labels: map[string]string{}},
+			},
+			hash: hash,
+		},
+		{
+			name:    "no state",
+			inspect: containerInspectResponse{Config: &containerInspectConfig{Labels: map[string]string{configHashLabel: hash}}},
+			hash:    hash,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if containerUpToDate(tt.inspect, tt.hash) {
+				t.Fatalf("%s should not be up to date", tt.name)
+			}
+		})
+	}
+}
+
 func TestValidateConfig(t *testing.T) {
 	t.Run("valid", func(t *testing.T) {
 		cfg := &Config{

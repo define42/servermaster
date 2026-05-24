@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -146,6 +147,7 @@ type containerSpec struct {
 	PortMappings  []portMapping     `json:"portmappings,omitempty"`
 	Mounts        []mount           `json:"mounts,omitempty"`
 	RestartPolicy string            `json:"restart_policy,omitempty"`
+	Labels        map[string]string `json:"labels,omitempty"`
 }
 
 type portMapping struct {
@@ -261,11 +263,22 @@ type runningContainerStatus struct {
 }
 
 type containerInspectResponse struct {
-	ID          string `json:"Id"`
-	Name        string `json:"Name"`
-	Image       string `json:"Image"`
-	ImageName   string `json:"ImageName"`
-	ImageDigest string `json:"ImageDigest"`
+	ID          string                  `json:"Id"`
+	Name        string                  `json:"Name"`
+	Image       string                  `json:"Image"`
+	ImageName   string                  `json:"ImageName"`
+	ImageDigest string                  `json:"ImageDigest"`
+	State       *containerInspectState  `json:"State"`
+	Config      *containerInspectConfig `json:"Config"`
+}
+
+type containerInspectState struct {
+	Running bool   `json:"Running"`
+	Status  string `json:"Status"`
+}
+
+type containerInspectConfig struct {
+	Labels map[string]string `json:"Labels"`
 }
 
 type rpmOstreeStatus struct {
@@ -965,7 +978,7 @@ func applyConfig(cfg *Config) error {
 
 	var reconcileErrors []error
 	for _, c := range cfg.Containers {
-		if err := recreateContainer(ctx, c); err != nil {
+		if err := reconcileContainer(ctx, c); err != nil {
 			log.Printf("reconcile container %q failed: %v", c.Name, err)
 			reconcileErrors = append(reconcileErrors, err)
 		}
@@ -1570,19 +1583,53 @@ func waitForUnixSocket(path string, timeout time.Duration) error {
 	return fmt.Errorf("socket not reachable: %s", path)
 }
 
-func recreateContainer(ctx context.Context, c ContainerConfig) error {
+// configHashLabel records, on the container, a hash of the ContainerConfig it
+// was created from. reconcileContainer uses it to leave a running container
+// untouched when its desired config is unchanged.
+const configHashLabel = "servermaster.config-hash"
+
+// configHash is a stable fingerprint of a container's desired configuration. Go
+// marshals struct fields in declaration order and map keys in sorted order, so
+// the encoding — and therefore the hash — is deterministic for equal configs.
+func configHash(c ContainerConfig) string {
+	data, _ := json.Marshal(c)
+	return fmt.Sprintf("%x", sha256.Sum256(data))
+}
+
+// reconcileContainer converges a single declared container to its desired state.
+// A container that is already running with a matching config hash is left as-is,
+// so an unchanged container is never restarted, re-pulled, or recreated. Any
+// other case (missing, stopped, or config changed) is (re)created from the spec.
+func reconcileContainer(ctx context.Context, c ContainerConfig) error {
 	spec, err := createSpec(c)
 	if err != nil {
 		return err
 	}
 
-	if err := pullImage(ctx, c.Image); err != nil {
-		return fmt.Errorf("pull image %q failed: %w", c.Image, err)
+	desiredHash := configHash(c)
+	if spec.Labels == nil {
+		spec.Labels = make(map[string]string, 1)
 	}
+	spec.Labels[configHashLabel] = desiredHash
 
 	exists, err := containerExists(ctx, c.Name)
 	if err != nil {
 		return fmt.Errorf("check container %q failed: %w", c.Name, err)
+	}
+
+	if exists {
+		inspect, err := inspectContainer(ctx, c.Name)
+		if err != nil {
+			return fmt.Errorf("inspect container %q failed: %w", c.Name, err)
+		}
+		if containerUpToDate(inspect, desiredHash) {
+			log.Printf("container %s unchanged, leaving it running", c.Name)
+			return nil
+		}
+	}
+
+	if err := pullImage(ctx, c.Image); err != nil {
+		return fmt.Errorf("pull image %q failed: %w", c.Image, err)
 	}
 
 	if exists {
@@ -1602,6 +1649,20 @@ func recreateContainer(ctx context.Context, c ContainerConfig) error {
 
 	log.Printf("started container %s", c.Name)
 	return nil
+}
+
+// containerUpToDate reports whether an existing container is running and was
+// created from the desired config (matching hash label). A stopped container, or
+// one created before this label existed or from a different config, is not up to
+// date and must be recreated.
+func containerUpToDate(inspect containerInspectResponse, desiredHash string) bool {
+	if inspect.State == nil || !inspect.State.Running {
+		return false
+	}
+	if inspect.Config == nil {
+		return false
+	}
+	return inspect.Config.Labels[configHashLabel] == desiredHash
 }
 
 func createSpec(c ContainerConfig) (*containerSpec, error) {

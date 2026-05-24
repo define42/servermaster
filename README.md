@@ -24,9 +24,9 @@ On startup, and after a successful remote config upload, `servermaster`:
 6. Starts the rootful `podman.socket` through systemd.
 7. Waits for the Podman Unix socket to become reachable.
 8. Stops running containers that are not declared in the config.
-9. Pulls declared images.
-10. Recreates declared containers from the desired spec.
-11. Starts the declared containers.
+9. For each declared container, leaves it running untouched if it is already
+   running with an unchanged configuration; otherwise pulls the image and
+   (re)creates and starts it from the desired spec.
 
 ## Usage
 
@@ -222,6 +222,15 @@ Example `apply_command`:
 ```
 
 ### Containers
+
+A declared container is recreated only when its configuration changes.
+`servermaster` records a hash of each container's config in the
+`servermaster.config-hash` label; on reconcile, a container already running with
+a matching hash is left untouched — not stopped, re-pulled, or recreated. A
+container is (re)created when it is missing, stopped, its config changed, or it
+predates the label. As a consequence, an unchanged `image` reference is not
+re-pulled, so a moved tag (for example `:latest`) is not picked up until the
+config changes; bump the tag or otherwise change the entry to force an update.
 
 - `name`: container name
 - `image`: image reference to pull and run

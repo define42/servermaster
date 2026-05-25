@@ -1,6 +1,9 @@
 package main
 
 import (
+	"flag"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"testing"
@@ -78,5 +81,73 @@ func TestWriteRPMMissingBinary(t *testing.T) {
 	}
 	if err := writeRPM(o); err == nil {
 		t.Fatal("expected error when the binary source is missing")
+	}
+}
+
+func TestMainWritesRPM(t *testing.T) {
+	prevArgs := os.Args
+	prevFlags := flag.CommandLine
+	prevLogOutput := log.Writer()
+	t.Cleanup(func() {
+		os.Args = prevArgs
+		flag.CommandLine = prevFlags
+		log.SetOutput(prevLogOutput)
+	})
+
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "servermaster")
+	unit := filepath.Join(dir, "servermaster.service")
+	license := filepath.Join(dir, "LICENSE")
+	out := filepath.Join(dir, "from-main.rpm")
+	for _, f := range []string{bin, unit, license} {
+		if err := os.WriteFile(f, []byte("content of "+filepath.Base(f)), 0o600); err != nil {
+			t.Fatalf("seed %s: %v", f, err)
+		}
+	}
+
+	flag.CommandLine = flag.NewFlagSet("mkrpm", flag.ContinueOnError)
+	flag.CommandLine.SetOutput(io.Discard)
+	os.Args = []string{
+		"mkrpm",
+		"-version", "2.0.0",
+		"-release", "3",
+		"-arch", "x86_64",
+		"-binary", bin,
+		"-unit", unit,
+		"-license", license,
+		"-out", out,
+	}
+
+	main()
+
+	if info, err := os.Stat(out); err != nil || info.Size() == 0 {
+		t.Fatalf("main output stat = %v, %v", info, err)
+	}
+}
+
+func TestWriteRPMOutputCreateError(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "servermaster")
+	unit := filepath.Join(dir, "servermaster.service")
+	license := filepath.Join(dir, "LICENSE")
+	blocker := filepath.Join(dir, "blocker")
+	for _, f := range []string{bin, unit, license, blocker} {
+		if err := os.WriteFile(f, []byte("content of "+filepath.Base(f)), 0o600); err != nil {
+			t.Fatalf("seed %s: %v", f, err)
+		}
+	}
+
+	o := options{
+		version:    "1.0.0",
+		release:    "1",
+		arch:       "x86_64",
+		binarySrc:  bin,
+		binaryDest: "/usr/bin/servermaster",
+		unitSrc:    unit,
+		licenseSrc: license,
+		out:        filepath.Join(blocker, "out.rpm"),
+	}
+	if err := writeRPM(o); err == nil {
+		t.Fatal("expected error creating output under a regular file")
 	}
 }

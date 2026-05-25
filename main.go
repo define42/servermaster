@@ -112,6 +112,16 @@ var applyMu sync.Mutex
 //nolint:gochecknoglobals // injectable seam so handlers can be tested without mutating the host.
 var configApplier = applyConfig
 
+// runServiceFunc and startWebServerFunc are the top-level service seams. They
+// let tests exercise command-line and run-loop behavior without binding long
+// lived listeners or mutating the host.
+//
+//nolint:gochecknoglobals // injectable seams for service orchestration tests.
+var (
+	runServiceFunc     = runService
+	startWebServerFunc = startWebServer
+)
+
 // servermasterStatusCollector gathers the /servermaster/status response. Tests
 // replace it so the handler can be exercised without requiring Podman or ostree.
 //
@@ -136,6 +146,24 @@ var serviceLog = newLogRing(servermasterLogTail)
 //
 //nolint:gochecknoglobals // injectable seam so the Podman client can be tested against a fake socket.
 var podmanSocketPath = "/run/podman/podman.sock"
+
+// apply step seams let tests cover the apply orchestration without touching the
+// host. Production keeps the concrete host-mutating functions.
+//
+//nolint:gochecknoglobals // injectable seams for applyConfig orchestration tests.
+var (
+	validateConfigFunc          = validateConfig
+	ensureHostnameFunc          = ensureHostname
+	ensureFoldersFunc           = ensureFolders
+	ensureFilesFunc             = ensureFiles
+	configureHostInterfacesFunc = configureHostInterfaces
+	configureFirewallPortsFunc  = configureFirewallPorts
+	startPodmanSocketFunc       = startPodmanSocket
+	waitForUnixSocketFunc       = waitForUnixSocket
+	newPodmanConnectionFunc     = bindings.NewConnection
+	stopUnmanagedContainersFunc = stopUnmanagedContainers
+	reconcileContainerFunc      = reconcileContainer
+)
 
 // nmstateStatePath is where the generated nmstate desired-state document is
 // written before it is applied. The .yml extension (JSON is valid YAML) lets
@@ -167,6 +195,17 @@ var (
 //
 //nolint:gochecknoglobals // injectable seam so interface speed can be tested with a fixture sysfs tree.
 var sysClassNetPath = "/sys/class/net"
+
+type dbusConnection interface {
+	Object(dest string, path dbus.ObjectPath) dbus.BusObject
+	Close() error
+}
+
+//nolint:gochecknoglobals // injectable seams so firewalld D-Bus logic can be tested with fakes.
+var (
+	ensureFirewalldRunningFunc = ensureFirewalldRunning
+	connectSystemBusFunc       = func() (dbusConnection, error) { return dbus.ConnectSystemBus() }
+)
 
 // logRing is a bounded, concurrency-safe buffer of the most recent log lines. It
 // is an io.Writer, so installing it as (part of) the standard logger's output
@@ -551,13 +590,13 @@ func main() {
 	listenAddress := flag.String("listen", defaultListenAddress, `web server listen address: a host:port for TCP (":8080" for all interfaces, "127.0.0.1:8080" for loopback only) or a Unix socket path ("unix:///run/servermaster/servermaster.sock")`)
 	flag.Parse()
 
-	if err := runService(*listenAddress, *configPath); err != nil {
+	if err := runServiceFunc(*listenAddress, *configPath); err != nil {
 		log.Fatal(err)
 	}
 }
 
 func runService(listenAddress, configPath string) error {
-	_, webServerErrors, err := startWebServer(listenAddress, configPath)
+	_, webServerErrors, err := startWebServerFunc(listenAddress, configPath)
 	if err != nil {
 		return err
 	}
@@ -1588,7 +1627,7 @@ func run(configPath string) error {
 		return err
 	}
 
-	return applyConfig(cfg)
+	return configApplier(cfg)
 }
 
 // applyConfig validates the desired node configuration and converges the host
@@ -1597,53 +1636,53 @@ func run(configPath string) error {
 // (the startup reconcile and a concurrent /servermaster/config upload) cannot
 // interleave host changes.
 func applyConfig(cfg *Config) error {
-	if err := validateConfig(cfg); err != nil {
+	if err := validateConfigFunc(cfg); err != nil {
 		return err
 	}
 
-	if err := ensureHostname(cfg.Hostname); err != nil {
+	if err := ensureHostnameFunc(cfg.Hostname); err != nil {
 		return err
 	}
 
-	if err := ensureFolders(cfg.Folders); err != nil {
+	if err := ensureFoldersFunc(cfg.Folders); err != nil {
 		return err
 	}
 
-	if err := ensureFiles(cfg.Files); err != nil {
+	if err := ensureFilesFunc(cfg.Files); err != nil {
 		return err
 	}
 
-	if err := configureHostInterfaces(cfg.Interfaces); err != nil {
+	if err := configureHostInterfacesFunc(cfg.Interfaces); err != nil {
 		return err
 	}
 
-	if err := configureFirewallPorts(cfg.FirewallPorts); err != nil {
+	if err := configureFirewallPortsFunc(cfg.FirewallPorts); err != nil {
 		return err
 	}
 
-	if err := startPodmanSocket(); err != nil {
+	if err := startPodmanSocketFunc(); err != nil {
 		return err
 	}
 
-	if err := waitForUnixSocket(podmanSocketPath, 10*time.Second); err != nil {
+	if err := waitForUnixSocketFunc(podmanSocketPath, 10*time.Second); err != nil {
 		return err
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	ctx, err := bindings.NewConnection(ctx, "unix:"+podmanSocketPath)
+	ctx, err := newPodmanConnectionFunc(ctx, "unix:"+podmanSocketPath)
 	if err != nil {
 		return err
 	}
 
-	if err := stopUnmanagedContainers(ctx, cfg.Containers); err != nil {
+	if err := stopUnmanagedContainersFunc(ctx, cfg.Containers); err != nil {
 		return err
 	}
 
 	var reconcileErrors []error
 	for _, c := range cfg.Containers {
-		if err := reconcileContainer(ctx, c); err != nil {
+		if err := reconcileContainerFunc(ctx, c); err != nil {
 			log.Printf("reconcile container %q failed: %v", c.Name, err)
 			reconcileErrors = append(reconcileErrors, err)
 		}
@@ -2175,7 +2214,7 @@ func configureFirewallPorts(ports []FirewallPortConfig) error {
 	// firewalld is an optional (Recommends) dependency: if it cannot be started
 	// and no ports are declared there is nothing to enforce, so skip; if ports
 	// are declared the config cannot be satisfied, so fail.
-	if err := ensureFirewalldRunning(); err != nil {
+	if err := ensureFirewalldRunningFunc(); err != nil {
 		if len(ports) == 0 {
 			log.Printf("skipping firewall reconcile, firewalld unavailable: %v", err)
 			return nil
@@ -2183,7 +2222,7 @@ func configureFirewallPorts(ports []FirewallPortConfig) error {
 		return err
 	}
 
-	conn, err := dbus.ConnectSystemBus()
+	conn, err := connectSystemBusFunc()
 	if err != nil {
 		return fmt.Errorf("connect to system bus failed: %w", err)
 	}
@@ -2213,7 +2252,7 @@ func configureFirewallPorts(ports []FirewallPortConfig) error {
 
 // openDeclaredFirewallPort opens a single declared port in both the runtime and
 // permanent firewalld configuration, defaulting an empty protocol to tcp.
-func openDeclaredFirewallPort(conn *dbus.Conn, firewalld, config dbus.BusObject, port FirewallPortConfig) error {
+func openDeclaredFirewallPort(conn dbusConnection, firewalld, config dbus.BusObject, port FirewallPortConfig) error {
 	zone := strings.TrimSpace(port.Zone)
 	portValue := strings.TrimSpace(port.Port)
 	protocol := strings.ToLower(strings.TrimSpace(port.Protocol))
@@ -2283,7 +2322,7 @@ func declaredFirewallPorts(ports []FirewallPortConfig, defaultZone string) map[s
 // access only as ports — so any service-provided access (notably the default
 // `ssh` service) survives a reconcile only if re-declared as a port. declared
 // maps a zone name to the set of "port/proto" keys allowed in that zone.
-func removeUnmanagedFirewallRules(conn *dbus.Conn, firewalld, config dbus.BusObject, declared map[string]map[string]struct{}) error {
+func removeUnmanagedFirewallRules(conn dbusConnection, firewalld, config dbus.BusObject, declared map[string]map[string]struct{}) error {
 	if err := removeUnmanagedRuntimeRules(firewalld, declared); err != nil {
 		return err
 	}
@@ -2341,7 +2380,7 @@ func pruneRuntimeZone(firewalld dbus.BusObject, zone string, declared map[string
 
 // removeUnmanagedPermanentRules prunes the permanent configuration, where
 // changes survive a firewalld reload and a reboot.
-func removeUnmanagedPermanentRules(conn *dbus.Conn, config dbus.BusObject, declared map[string]map[string]struct{}) error {
+func removeUnmanagedPermanentRules(conn dbusConnection, config dbus.BusObject, declared map[string]map[string]struct{}) error {
 	var zones []string
 	if err := config.Call(firewalldConfigInterface+".getZoneNames", 0).Store(&zones); err != nil {
 		return fmt.Errorf("list permanent firewall zones failed: %w", err)
@@ -2354,7 +2393,7 @@ func removeUnmanagedPermanentRules(conn *dbus.Conn, config dbus.BusObject, decla
 	return nil
 }
 
-func prunePermanentZone(conn *dbus.Conn, config dbus.BusObject, zone string, declared map[string]struct{}) error {
+func prunePermanentZone(conn dbusConnection, config dbus.BusObject, zone string, declared map[string]struct{}) error {
 	var zonePath dbus.ObjectPath
 	if err := config.Call(firewalldConfigInterface+".getZoneByName", 0, zone).Store(&zonePath); err != nil {
 		return fmt.Errorf("look up permanent zone %q failed: %w", zone, err)
@@ -2404,7 +2443,7 @@ func addFirewallPort(firewalld dbus.BusObject, zone string, port string, protoco
 // config on `firewall-cmd --reload`, so without this the port would silently
 // close until the next reconcile at boot. An empty zone resolves to firewalld's
 // default zone, since the permanent config is addressed by an explicit name.
-func ensurePermanentFirewallPort(conn *dbus.Conn, firewalld, config dbus.BusObject, zone, port, protocol string) error {
+func ensurePermanentFirewallPort(conn dbusConnection, firewalld, config dbus.BusObject, zone, port, protocol string) error {
 	zoneName := zone
 	if zoneName == "" {
 		if err := firewalld.Call(firewalldBusName+".getDefaultZone", 0).Store(&zoneName); err != nil {

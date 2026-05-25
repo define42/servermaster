@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	dbus "github.com/godbus/dbus/v5"
@@ -66,6 +67,30 @@ func (f *fakeBusObject) SetProperty(string, any) error            { return nil }
 func (f *fakeBusObject) Destination() string                      { return "" }
 func (f *fakeBusObject) Path() dbus.ObjectPath                    { return "" }
 
+type fakeDBusConn struct {
+	objects map[dbus.ObjectPath]dbus.BusObject
+	closed  bool
+}
+
+func (f *fakeDBusConn) Object(_ string, path dbus.ObjectPath) dbus.BusObject {
+	return f.objects[path]
+}
+
+func (f *fakeDBusConn) Close() error {
+	f.closed = true
+	return nil
+}
+
+func resetFirewalldSeams(t *testing.T) {
+	t.Helper()
+	prevEnsure := ensureFirewalldRunningFunc
+	prevConnect := connectSystemBusFunc
+	t.Cleanup(func() {
+		ensureFirewalldRunningFunc = prevEnsure
+		connectSystemBusFunc = prevConnect
+	})
+}
+
 func TestQueryAndAddFirewallPort(t *testing.T) {
 	fb := newFakeBus()
 	fb.respond(firewalldZoneInterface+".queryPort", true)
@@ -120,5 +145,102 @@ func TestRemoveUnmanagedFirewallRules(t *testing.T) {
 	}
 	if firewalld.callCount(firewalldZoneInterface+".removePort") != 1 {
 		t.Fatalf("expected the unmanaged runtime port to be closed")
+	}
+}
+
+func TestConfigureFirewallPorts(t *testing.T) {
+	resetFirewalldSeams(t)
+
+	firewalld := newFakeBus()
+	firewalld.respond(firewalldBusName+".getDefaultZone", "public")
+	firewalld.respond(firewalldZoneInterface+".queryPort", false)
+	firewalld.respond(firewalldZoneInterface+".addPort", "public")
+	firewalld.respond(firewalldZoneInterface+".getZones", []string{"public"})
+	firewalld.respond(firewalldZoneInterface+".getPorts", [][]string{{"8080", "tcp"}, {"22", "tcp"}})
+	firewalld.respond(firewalldZoneInterface+".getServices", []string{})
+	firewalld.respond(firewalldZoneInterface+".removePort", "public")
+
+	config := newFakeBus()
+	config.respond(firewalldConfigInterface+".getZoneByName", dbus.ObjectPath("/firewalld/public"))
+	config.respond(firewalldConfigInterface+".getZoneNames", []string{"public"})
+
+	permanentZone := newFakeBus()
+	permanentZone.respond(firewalldConfigZoneInterface+".queryPort", false)
+	permanentZone.respond(firewalldConfigZoneInterface+".getPorts", []firewallPortTuple{
+		{Port: "8080", Protocol: "tcp"},
+		{Port: "22", Protocol: "tcp"},
+	})
+	permanentZone.respond(firewalldConfigZoneInterface+".getServices", []string{"ssh"})
+
+	conn := &fakeDBusConn{objects: map[dbus.ObjectPath]dbus.BusObject{
+		dbus.ObjectPath(firewalldObjectPath): firewalld,
+		dbus.ObjectPath(firewalldConfigPath): config,
+		dbus.ObjectPath("/firewalld/public"): permanentZone,
+	}}
+	ensureFirewalldRunningFunc = func() error { return nil }
+	connectSystemBusFunc = func() (dbusConnection, error) { return conn, nil }
+
+	if err := configureFirewallPorts([]FirewallPortConfig{{Port: "8080"}}); err != nil {
+		t.Fatalf("configureFirewallPorts: %v", err)
+	}
+	if !conn.closed {
+		t.Fatal("expected system bus connection to be closed")
+	}
+	if firewalld.callCount(firewalldZoneInterface+".addPort") != 1 {
+		t.Fatalf("expected runtime port to be opened, calls=%v", firewalld.calls)
+	}
+	if firewalld.callCount(firewalldZoneInterface+".removePort") != 1 {
+		t.Fatalf("expected unmanaged runtime port to be closed, calls=%v", firewalld.calls)
+	}
+	if permanentZone.callCount(firewalldConfigZoneInterface+".addPort") != 1 {
+		t.Fatalf("expected permanent port to be added, calls=%v", permanentZone.calls)
+	}
+	if permanentZone.callCount(firewalldConfigZoneInterface+".removePort") != 1 {
+		t.Fatalf("expected unmanaged permanent port to be removed, calls=%v", permanentZone.calls)
+	}
+	if permanentZone.callCount(firewalldConfigZoneInterface+".removeService") != 1 {
+		t.Fatalf("expected permanent service to be removed, calls=%v", permanentZone.calls)
+	}
+}
+
+func TestConfigureFirewallPortsUnavailable(t *testing.T) {
+	resetFirewalldSeams(t)
+	unavailable := errors.New("firewalld missing")
+	ensureFirewalldRunningFunc = func() error { return unavailable }
+
+	if err := configureFirewallPorts(nil); err != nil {
+		t.Fatalf("empty firewall config should tolerate unavailable firewalld: %v", err)
+	}
+	if err := configureFirewallPorts([]FirewallPortConfig{{Port: "22"}}); !errors.Is(err, unavailable) {
+		t.Fatalf("configureFirewallPorts err = %v, want %v", err, unavailable)
+	}
+}
+
+func TestConfigureFirewallPortsConnectError(t *testing.T) {
+	resetFirewalldSeams(t)
+	connectErr := errors.New("no bus")
+	ensureFirewalldRunningFunc = func() error { return nil }
+	connectSystemBusFunc = func() (dbusConnection, error) { return nil, connectErr }
+
+	if err := configureFirewallPorts(nil); !errors.Is(err, connectErr) {
+		t.Fatalf("configureFirewallPorts err = %v, want %v", err, connectErr)
+	}
+}
+
+func TestEnsurePermanentFirewallPortAlreadyPresent(t *testing.T) {
+	firewalld := newFakeBus()
+	config := newFakeBus()
+	config.respond(firewalldConfigInterface+".getZoneByName", dbus.ObjectPath("/firewalld/public"))
+	permanentZone := newFakeBus()
+	permanentZone.respond(firewalldConfigZoneInterface+".queryPort", true)
+	conn := &fakeDBusConn{objects: map[dbus.ObjectPath]dbus.BusObject{
+		dbus.ObjectPath("/firewalld/public"): permanentZone,
+	}}
+
+	if err := ensurePermanentFirewallPort(conn, firewalld, config, "public", "443", "tcp"); err != nil {
+		t.Fatalf("ensurePermanentFirewallPort: %v", err)
+	}
+	if permanentZone.callCount(firewalldConfigZoneInterface+".addPort") != 0 {
+		t.Fatalf("already-present port should not be added again, calls=%v", permanentZone.calls)
 	}
 }

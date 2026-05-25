@@ -468,3 +468,46 @@ func TestCollectOstreeStatusSuccess(t *testing.T) {
 		t.Fatalf("status = %+v", st)
 	}
 }
+
+func TestCollectOstreeStatusFallbacks(t *testing.T) {
+	t.Run("bootc after rpm parse failure", func(t *testing.T) {
+		fakeCommand(t, "rpm-ostree", "echo not-json")
+		fakeCommand(t, "bootc", `echo '{"image":{"reference":"quay.io/os:v2"}}'`)
+
+		st, err := collectOstreeStatus(context.Background())
+		if err != nil {
+			t.Fatalf("collectOstreeStatus: %v", err)
+		}
+		if st.Source != "bootc status --json" || st.Version != "v2" {
+			t.Fatalf("status = %+v, want bootc v2", st)
+		}
+	})
+
+	t.Run("ostree admin after rpm and bootc fail", func(t *testing.T) {
+		fakeCommand(t, "rpm-ostree", "exit 1")
+		fakeCommand(t, "bootc", "echo '{}'")
+		fakeCommand(t, "ostree", "printf '  old deployment\\n* fedora abc123.0\\n'")
+
+		st, err := collectOstreeStatus(context.Background())
+		if err != nil {
+			t.Fatalf("collectOstreeStatus: %v", err)
+		}
+		if st.Source != "ostree admin status" || st.Deployment != "fedora abc123.0" || !st.Booted {
+			t.Fatalf("status = %+v, want ostree admin booted deployment", st)
+		}
+	})
+}
+
+func TestListenUnixEarlyErrors(t *testing.T) {
+	if _, err := listen("unix:"); err == nil {
+		t.Fatal("expected empty unix socket path error")
+	}
+
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("seed blocker: %v", err)
+	}
+	if _, err := listen("unix://" + filepath.Join(blocker, "sock")); err == nil {
+		t.Fatal("expected socket directory creation error")
+	}
+}

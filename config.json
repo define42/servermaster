@@ -49,6 +49,10 @@
       "name": "ens1f1np1",
       "ipv6_method": "link-local",
       "ipv6_addr_gen_mode": "eui64"
+    },
+    {
+      "name": "eth1",
+      "ipv4_method": "dhcp"
     }
   ],
   "ostree": {

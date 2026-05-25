@@ -557,6 +557,65 @@ func TestBuildNMStateIPv6Gateway(t *testing.T) {
 	}
 }
 
+func TestBuildNMStateIPv4DHCP(t *testing.T) {
+	for _, method := range []string{"dhcp", "auto"} {
+		t.Run(method, func(t *testing.T) {
+			state, err := buildNMState([]InterfaceConfig{{Name: "eth0", IPv4Method: method}})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			iface := state.Interfaces[0]
+			if iface.IPv6 != nil {
+				t.Fatalf("ipv4_method should leave ipv6 untouched: %+v", iface.IPv6)
+			}
+			if iface.IPv4 == nil || !iface.IPv4.Enabled || !iface.IPv4.DHCP {
+				t.Fatalf("ipv4 stack should be enabled with dhcp on: %+v", iface.IPv4)
+			}
+			if len(iface.IPv4.Addresses) != 0 {
+				t.Fatalf("dhcp stack should carry no static addresses: %+v", iface.IPv4.Addresses)
+			}
+		})
+	}
+}
+
+func TestBuildNMStateIPv4Disabled(t *testing.T) {
+	state, err := buildNMState([]InterfaceConfig{{Name: "eth0", IPv4Method: "disabled"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	ipv4 := state.Interfaces[0].IPv4
+	if ipv4 == nil || ipv4.Enabled || ipv4.DHCP {
+		t.Fatalf("ipv4 disabled stack mismatch: %+v", ipv4)
+	}
+}
+
+func TestBuildNMStateIPv4DHCPWithIPv6Static(t *testing.T) {
+	// IPv4 DHCP coexists with a static IPv6 address (different families).
+	state, err := buildNMState([]InterfaceConfig{{
+		Name:       "eth0",
+		IPv4Method: "dhcp",
+		IPAddress:  "2001:db8::10",
+		Subnet:     "2001:db8::/64",
+	}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	iface := state.Interfaces[0]
+	if iface.IPv4 == nil || !iface.IPv4.DHCP {
+		t.Fatalf("ipv4 dhcp stack mismatch: %+v", iface.IPv4)
+	}
+	if iface.IPv6 == nil || iface.IPv6.Addresses[0].IP != "2001:db8::10" {
+		t.Fatalf("static ipv6 address should survive: %+v", iface.IPv6)
+	}
+}
+
+func TestBuildNMStateIPv4Errors(t *testing.T) {
+	assertBuildNMStateErrors(t, []nmStateErrorCase{
+		{"unknown method", InterfaceConfig{Name: "eth0", IPv4Method: "bogus"}},
+		{"method conflicts with static v4", InterfaceConfig{Name: "eth0", IPAddress: "192.168.1.10", Subnet: "192.168.1.0/24", IPv4Method: "dhcp"}},
+	})
+}
+
 func TestBuildNMStateIPv6LinkLocal(t *testing.T) {
 	// The nmcli equivalent: ipv6.method link-local, ipv6.addr-gen-mode eui64.
 	state, err := buildNMState([]InterfaceConfig{{

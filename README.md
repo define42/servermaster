@@ -261,6 +261,14 @@ list.
 - `subnet`: subnet CIDR for the host interface
 - `gateway`: default gateway IP for the host interface
 - `dns`: DNS server list for the host interface
+- `ipv4_method`: optional IPv4 addressing mode for interfaces without a static
+  IPv4 `ip_address`, mirroring NetworkManager's `ipv4.method`:
+  - `dhcp` (alias `auto`): lease an IPv4 address over DHCP
+  - `disabled`: turn IPv4 off
+
+  It is mutually exclusive with a static IPv4 `ip_address` (which is the
+  `manual` method), and independent of IPv6, so it can be paired with a static
+  IPv6 `ip_address` or an `ipv6_method`.
 - `ipv6_method`: optional IPv6 addressing mode for interfaces without a static
   IPv6 `ip_address`, mirroring NetworkManager's `ipv6.method`:
   - `link-local`: enable IPv6 with only the auto-generated link-local address
@@ -306,6 +314,15 @@ free, since nmstate writes a persisted profile that comes up on boot):
   "name": "ens1f1np1",
   "ipv6_method": "link-local",
   "ipv6_addr_gen_mode": "eui64"
+}
+```
+
+An interface that leases its IPv4 address over DHCP:
+
+```json
+{
+  "name": "eth0",
+  "ipv4_method": "dhcp"
 }
 ```
 

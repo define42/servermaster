@@ -241,6 +241,12 @@ type InterfaceConfig struct {
 	Subnet    string   `json:"subnet"`
 	Gateway   string   `json:"gateway"`
 	DNS       []string `json:"dns"`
+	// IPv4Method mirrors NetworkManager's ipv4.method for interfaces without a
+	// static IPv4 ip_address. "" leaves IPv4 at nmstate's default; "dhcp" (or its
+	// alias "auto", since IPv4 has no SLAAC) leases an address over DHCP;
+	// "disabled" turns IPv4 off. It is mutually exclusive with a static IPv4
+	// ip_address, which is itself the "manual" method.
+	IPv4Method string `json:"ipv4_method,omitempty"`
 	// IPv6Method mirrors NetworkManager's ipv6.method for interfaces without a
 	// static IPv6 ip_address. "" leaves IPv6 at nmstate's default; "link-local"
 	// enables IPv6 with only the auto-generated link-local address (no DHCPv6,
@@ -3469,11 +3475,49 @@ func buildNMInterface(iface InterfaceConfig, label string) (nmInterface, error) 
 		}
 	}
 
+	if err := applyIPv4Settings(&nmIface, iface, label); err != nil {
+		return nmInterface{}, err
+	}
+
 	if err := applyIPv6Settings(&nmIface, iface, label); err != nil {
 		return nmInterface{}, err
 	}
 
 	return nmIface, nil
+}
+
+// ipv4MethodStack builds the nmstate IPv4 stack for a supported ipv4_method,
+// mirroring a NetworkManager ipv4.method. It reports false for an unrecognized
+// method so the caller can reject it. IPv4 has no SLAAC, so "auto" is DHCP.
+func ipv4MethodStack(method string) (*nmIPStack, bool) {
+	switch method {
+	case "dhcp", "auto":
+		return &nmIPStack{Enabled: true, DHCP: true}, true
+	case "disabled":
+		return &nmIPStack{Enabled: false, DHCP: false}, true
+	default:
+		return nil, false
+	}
+}
+
+// applyIPv4Settings layers the optional ipv4_method onto nmIface. The
+// static-address path in buildNMInterface has already run, so nmIface.IPv4 is
+// non-nil exactly when a static IPv4 ip_address was declared (the "manual"
+// method), which ipv4_method must not contradict.
+func applyIPv4Settings(nmIface *nmInterface, iface InterfaceConfig, label string) error {
+	method := strings.TrimSpace(iface.IPv4Method)
+	if method == "" {
+		return nil
+	}
+	if nmIface.IPv4 != nil {
+		return fmt.Errorf("host interface %s sets ipv4_method %q together with a static IPv4 ip_address; they are mutually exclusive", label, method)
+	}
+	stack, ok := ipv4MethodStack(method)
+	if !ok {
+		return fmt.Errorf("host interface %s has invalid ipv4_method %q (want dhcp, auto, or disabled)", label, method)
+	}
+	nmIface.IPv4 = stack
+	return nil
 }
 
 // ipv6MethodStack builds the nmstate IPv6 stack for a supported ipv6_method,

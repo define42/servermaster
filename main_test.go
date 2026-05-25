@@ -529,6 +529,22 @@ func TestBuildNMStateVLAN(t *testing.T) {
 	}
 }
 
+func TestBuildNMStateMTU(t *testing.T) {
+	state, err := buildNMState([]InterfaceConfig{{
+		Name:       "eth0",
+		MTU:        intPtr(9000),
+		IPv4Method: "dhcp",
+	}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	mtu := state.Interfaces[0].MTU
+	if mtu == nil || *mtu != 9000 {
+		t.Fatalf("mtu = %v, want 9000", mtu)
+	}
+}
+
 func TestBuildNMStateVLANErrors(t *testing.T) {
 	assertBuildNMStateErrors(t, []nmStateErrorCase{
 		{"vlan type without settings", InterfaceConfig{Name: "eth0.100", Type: "vlan"}},
@@ -787,6 +803,8 @@ func TestBuildNMStateErrors(t *testing.T) {
 		{"address outside subnet", InterfaceConfig{Name: "eth0", IPAddress: "10.1.0.1", Subnet: "10.0.0.0/24"}},
 		{"bad gateway", InterfaceConfig{Name: "eth0", Gateway: "not-an-ip"}},
 		{"bad dns", InterfaceConfig{Name: "eth0", DNS: []string{"not-an-ip"}}},
+		{"zero mtu", InterfaceConfig{Name: "eth0", MTU: intPtr(0)}},
+		{"negative mtu", InterfaceConfig{Name: "eth0", MTU: intPtr(-1)}},
 		{"negative txqueuelen", InterfaceConfig{Name: "eth0", TxQueueLen: intPtr(-1)}},
 	})
 }

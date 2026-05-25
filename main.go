@@ -241,6 +241,9 @@ type InterfaceConfig struct {
 	Subnet    string   `json:"subnet"`
 	Gateway   string   `json:"gateway"`
 	DNS       []string `json:"dns"`
+	// MTU, when set, is the interface maximum transmission unit applied by
+	// nmstate through NetworkManager. A nil value leaves it untouched.
+	MTU *int `json:"mtu,omitempty"`
 	// IPv4Method mirrors NetworkManager's ipv4.method for interfaces without a
 	// static IPv4 ip_address. "" leaves IPv4 at nmstate's default; "dhcp" (or its
 	// alias "auto", since IPv4 has no SLAAC) leases an address over DHCP;
@@ -2994,6 +2997,7 @@ type nmInterface struct {
 	Name  string     `json:"name"`
 	Type  string     `json:"type"`
 	State string     `json:"state"`
+	MTU   *int       `json:"mtu,omitempty"`
 	IPv4  *nmIPStack `json:"ipv4,omitempty"`
 	IPv6  *nmIPStack `json:"ipv6,omitempty"`
 	VLAN  *nmVLAN    `json:"vlan,omitempty"`
@@ -3408,8 +3412,25 @@ func buildNMState(interfaces []InterfaceConfig) (*nmState, error) {
 }
 
 // buildNMInterface translates one InterfaceConfig into an nmstate interface,
-// validating its name, paired ip_address/subnet, optional VLAN settings, and
+// validating its name, paired ip_address/subnet, optional MTU/VLAN settings, and
 // (when set) its static address.
+// maxMTU is the largest MTU value representable by the kernel's 32-bit
+// interface MTU attribute. Device-specific min/max limits are enforced by
+// nmstate/NetworkManager when the desired state is applied.
+const maxMTU = 0xFFFFFFFF
+
+// validateMTU checks a declared MTU is in the generic kernel range. A nil value
+// (unset) is valid and leaves the MTU untouched.
+func validateMTU(iface InterfaceConfig, label string) error {
+	if iface.MTU == nil {
+		return nil
+	}
+	if *iface.MTU < 1 || uint64(*iface.MTU) > maxMTU {
+		return fmt.Errorf("host interface %s mtu %d must be between 1 and %d", label, *iface.MTU, uint64(maxMTU))
+	}
+	return nil
+}
+
 // maxTxQueueLen is the largest accepted transmit queue length: the kernel's
 // tx_queue_len is a 32-bit unsigned value.
 const maxTxQueueLen = 0xFFFFFFFF
@@ -3431,6 +3452,10 @@ func buildNMInterface(iface InterfaceConfig, label string) (nmInterface, error) 
 		return nmInterface{}, fmt.Errorf("host interface %s is missing name", label)
 	}
 
+	if err := validateMTU(iface, label); err != nil {
+		return nmInterface{}, err
+	}
+
 	if err := validateTxQueueLen(iface, label); err != nil {
 		return nmInterface{}, err
 	}
@@ -3448,7 +3473,7 @@ func buildNMInterface(iface InterfaceConfig, label string) (nmInterface, error) 
 	if ifaceType == "" {
 		ifaceType = "ethernet"
 	}
-	nmIface := nmInterface{Name: iface.Name, Type: ifaceType, State: "up"}
+	nmIface := nmInterface{Name: iface.Name, Type: ifaceType, State: "up", MTU: iface.MTU}
 
 	vlan, err := interfaceVLAN(iface, label, ifaceType)
 	if err != nil {

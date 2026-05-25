@@ -21,6 +21,7 @@
     {
       "name": "dummy0",
       "type": "dummy",
+      "mtu": 9000,
       "ip_address": "192.168.1.10",
       "subnet": "192.168.1.0/24"
     },

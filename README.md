@@ -261,6 +261,10 @@ list.
 - `subnet`: subnet CIDR for the host interface
 - `gateway`: default gateway IP for the host interface
 - `dns`: DNS server list for the host interface
+- `mtu`: optional interface maximum transmission unit. The generic accepted
+  range is `1`–`4294967295`; the interface's actual device-specific limits are
+  enforced by nmstate/NetworkManager when applied. Omitting it leaves the MTU
+  untouched.
 - `ipv4_method`: optional IPv4 addressing mode for interfaces without a static
   IPv4 `ip_address`, mirroring NetworkManager's `ipv4.method`:
   - `dhcp` (alias `auto`): lease an IPv4 address over DHCP

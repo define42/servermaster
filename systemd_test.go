@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -194,5 +196,22 @@ func TestSystemdUnitStartTimeoutsRemainBounded(t *testing.T) {
 	}
 	if timeout <= 0 || timeout > systemdJobTimeout {
 		t.Fatalf("timeout = %s, want within %s", timeout, systemdJobTimeout)
+	}
+}
+
+func TestWaitForUnixSocket(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "s.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = l.Close() }()
+
+	if err := waitForUnixSocket(sock, time.Second); err != nil {
+		t.Fatalf("reachable socket: %v", err)
+	}
+	missing := filepath.Join(t.TempDir(), "missing.sock")
+	if err := waitForUnixSocket(missing, 150*time.Millisecond); err == nil {
+		t.Fatal("expected timeout error for absent socket")
 	}
 }

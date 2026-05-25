@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -80,6 +81,31 @@ func (f *fakePodman) start(t *testing.T) context.Context {
 	return ctx
 }
 
+func TestSplitLogFrame(t *testing.T) {
+	if got := splitLogFrame(""); got != nil {
+		t.Fatalf("splitLogFrame(empty) = %v, want nil", got)
+	}
+	if got := splitLogFrame("a\nb\n"); len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Fatalf("splitLogFrame = %v, want [a b]", got)
+	}
+}
+
+func TestAppendStatusError(t *testing.T) {
+	if got := appendStatusError("", "first"); got != "first" {
+		t.Fatalf("appendStatusError(empty) = %q", got)
+	}
+	if got := appendStatusError("first", "second"); got != "first; second" {
+		t.Fatalf("appendStatusError = %q, want joined", got)
+	}
+}
+
+func TestContainerUpToDateNilConfig(t *testing.T) {
+	inspect := containerInspectResponse{State: &containerInspectState{Running: true}, Config: nil}
+	if containerUpToDate(inspect, "hash") {
+		t.Fatal("a running container with no config is not up to date")
+	}
+}
+
 // handler routes the libpod endpoints used by the tool. The bindings prefix
 // every path with /v<ver>/libpod, which is stripped before dispatch.
 func (f *fakePodman) handler() http.Handler {
@@ -97,6 +123,22 @@ func (f *fakePodman) handler() http.Handler {
 		}
 		mux.ServeHTTP(w, r)
 	})
+}
+
+func TestDemuxShortReader(t *testing.T) {
+	buf := make([]byte, 1024)
+	if _, _, err := demuxHeader(strings.NewReader("123"), buf); err == nil {
+		t.Fatal("demuxHeader expected error on truncated header")
+	}
+	if _, err := demuxFrame(strings.NewReader("12"), buf, 10); err == nil {
+		t.Fatal("demuxFrame expected error on truncated payload")
+	}
+	// An undersized buffer is grown internally before the 8-byte header read.
+	header := multiplexedLog(1, "")[:8]
+	fd, length, err := demuxHeader(strings.NewReader(string(header)), make([]byte, 4))
+	if err != nil || fd != 1 || length != 0 {
+		t.Fatalf("demuxHeader(small buf) = %d,%d,%v", fd, length, err)
+	}
 }
 
 func (f *fakePodman) registerContainerRoutes(mux *http.ServeMux) {
@@ -577,5 +619,231 @@ func TestContainerLogLinesTailTrim(t *testing.T) {
 	}
 	if len(lines) != 2 || lines[0] != "stdout: line3" || lines[1] != "stdout: line4" {
 		t.Fatalf("tail-trimmed lines = %v, want last two", lines)
+	}
+}
+
+func TestContainerNeedsStop(t *testing.T) {
+	tests := []struct {
+		state string
+		want  bool
+	}{
+		{"running", true},
+		{"Running", true},
+		{"paused", true},
+		{"restarting", true},
+		{"unrecognized", true},
+		{"created", false},
+		{"configured", false},
+		{"dead", false},
+		{"exited", false},
+		{"removing", false},
+		{"stopped", false},
+		{"EXITED", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.state, func(t *testing.T) {
+			if got := containerNeedsStop(tt.state); got != tt.want {
+				t.Fatalf("containerNeedsStop(%q) = %v, want %v", tt.state, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestContainerIsConfigured(t *testing.T) {
+	configured := map[string]struct{}{"web": {}, "db": {}}
+
+	tests := []struct {
+		name      string
+		container listedContainer
+		want      bool
+	}{
+		{"matches", listedContainer{Names: []string{"web"}}, true},
+		{"matches one of many", listedContainer{Names: []string{"other", "db"}}, true},
+		{"no match", listedContainer{Names: []string{"unmanaged"}}, false},
+		{"no names", listedContainer{Names: nil}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := containerIsConfigured(tt.container, configured); got != tt.want {
+				t.Fatalf("containerIsConfigured(%v) = %v, want %v", tt.container.Names, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestContainerDisplayName(t *testing.T) {
+	tests := []struct {
+		name      string
+		container listedContainer
+		want      string
+	}{
+		{"prefers name", listedContainer{Names: []string{"web"}, ID: "abc123"}, "web"},
+		{"falls back to id", listedContainer{ID: "abc123"}, "abc123"},
+		{"unknown", listedContainer{}, "<unknown>"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := containerDisplayName(tt.container); got != tt.want {
+				t.Fatalf("containerDisplayName = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCreateSpec(t *testing.T) {
+	c := ContainerConfig{
+		Name:  "web",
+		Image: "docker.io/library/nginx:latest",
+		User:  "0:0",
+		Env:   map[string]string{"TZ": "Europe/Copenhagen"},
+		Ports: []PortConfig{
+			{HostIP: "0.0.0.0", HostPort: 8081, ContainerPort: 80},
+			{HostIP: "127.0.0.1", HostPort: 9000, ContainerPort: 9000, Protocol: "udp"},
+		},
+		Volumes: []VolumeConfig{
+			{HostPath: "/data/web", ContainerPath: "/usr/share/nginx/html", ReadOnly: true, SELinux: "Z"},
+			{HostPath: "/data/cache", ContainerPath: "/cache", ReadOnly: false},
+		},
+		Restart: "always",
+	}
+
+	spec, err := createSpec(c)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if spec.Name != "web" || spec.Image != c.Image || spec.User != "0:0" {
+		t.Fatalf("spec metadata mismatch: %+v", spec)
+	}
+
+	if spec.PortMappings[0].Protocol != "tcp" {
+		t.Fatalf("port without protocol should default to tcp, got %q", spec.PortMappings[0].Protocol)
+	}
+	if spec.PortMappings[0].HostPort != 8081 || spec.PortMappings[0].ContainerPort != 80 {
+		t.Fatalf("first port mapping mismatch: %+v", spec.PortMappings[0])
+	}
+	if spec.PortMappings[1].Protocol != "udp" {
+		t.Fatalf("explicit protocol should be preserved, got %q", spec.PortMappings[1].Protocol)
+	}
+
+	if !reflect.DeepEqual(spec.Mounts[0].Options, []string{"rbind", "ro", "Z"}) {
+		t.Fatalf("read-only mount options = %v, want [rbind ro Z]", spec.Mounts[0].Options)
+	}
+	if !reflect.DeepEqual(spec.Mounts[1].Options, []string{"rbind", "rw"}) {
+		t.Fatalf("read-write mount options = %v, want [rbind rw]", spec.Mounts[1].Options)
+	}
+	if spec.Mounts[0].Type != "bind" || spec.Mounts[0].Source != "/data/web" || spec.Mounts[0].Destination != "/usr/share/nginx/html" {
+		t.Fatalf("mount mapping mismatch: %+v", spec.Mounts[0])
+	}
+
+	if spec.RestartPolicy != "always" {
+		t.Fatalf("restart policy = %q, want always", spec.RestartPolicy)
+	}
+}
+
+func TestConfigHash(t *testing.T) {
+	base := ContainerConfig{
+		Name:  "web",
+		Image: "docker.io/library/nginx:1.25",
+		Env:   map[string]string{"A": "1", "B": "2"},
+		Ports: []PortConfig{{HostPort: 8081, ContainerPort: 80}},
+	}
+
+	baseHash := configHash(base)
+
+	// Map ordering must not affect the hash (Go marshals map keys sorted), and an
+	// equal config must produce an equal hash.
+	reordered := base
+	reordered.Env = map[string]string{"B": "2", "A": "1"}
+	if configHash(reordered) != baseHash {
+		t.Fatal("hash changed for an equal config (map literal order should not matter)")
+	}
+
+	changes := map[string]ContainerConfig{
+		"image":   {Name: "web", Image: "docker.io/library/nginx:1.26"},
+		"env":     {Name: "web", Image: "docker.io/library/nginx:1.25", Env: map[string]string{"A": "1", "B": "3"}},
+		"command": {Name: "web", Image: "docker.io/library/nginx:1.25", Command: []string{"sleep", "1"}},
+		"restart": {Name: "web", Image: "docker.io/library/nginx:1.25", Restart: "always"},
+	}
+	for name, changed := range changes {
+		if configHash(changed) == baseHash {
+			t.Fatalf("hash did not change when %s changed", name)
+		}
+	}
+}
+
+func TestContainerUpToDate(t *testing.T) {
+	const hash = "abc123"
+
+	running := containerInspectResponse{
+		State:  &containerInspectState{Running: true, Status: "running"},
+		Config: &containerInspectConfig{Labels: map[string]string{configHashLabel: hash}},
+	}
+	if !containerUpToDate(running, hash) {
+		t.Fatal("running container with matching hash should be up to date")
+	}
+
+	tests := []struct {
+		name    string
+		inspect containerInspectResponse
+		hash    string
+	}{
+		{
+			name:    "hash differs",
+			inspect: running,
+			hash:    "different",
+		},
+		{
+			name: "not running",
+			inspect: containerInspectResponse{
+				State:  &containerInspectState{Running: false, Status: "exited"},
+				Config: &containerInspectConfig{Labels: map[string]string{configHashLabel: hash}},
+			},
+			hash: hash,
+		},
+		{
+			name: "missing label",
+			inspect: containerInspectResponse{
+				State:  &containerInspectState{Running: true},
+				Config: &containerInspectConfig{Labels: map[string]string{}},
+			},
+			hash: hash,
+		},
+		{
+			name:    "no state",
+			inspect: containerInspectResponse{Config: &containerInspectConfig{Labels: map[string]string{configHashLabel: hash}}},
+			hash:    hash,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if containerUpToDate(tt.inspect, tt.hash) {
+				t.Fatalf("%s should not be up to date", tt.name)
+			}
+		})
+	}
+}
+
+func TestImageReferenceVersion(t *testing.T) {
+	tests := []struct {
+		ref  string
+		want string
+	}{
+		{"docker.io/library/nginx:1.25", "1.25"},
+		{"localhost:5000/app/backend:v2", "v2"},
+		{"localhost:5000/app/backend", ""},
+		{"quay.io/example/app@sha256:abc", "sha256:abc"},
+		{"", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.ref, func(t *testing.T) {
+			if got := imageReferenceVersion(tt.ref); got != tt.want {
+				t.Fatalf("imageReferenceVersion(%q) = %q, want %q", tt.ref, got, tt.want)
+			}
+		})
 	}
 }

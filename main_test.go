@@ -589,6 +589,43 @@ func TestBuildNMStateIPv4Disabled(t *testing.T) {
 	}
 }
 
+func TestBuildNMStateClearsDNSWhenNoneDeclared(t *testing.T) {
+	state, err := buildNMState([]InterfaceConfig{{
+		Name:            "dummy0",
+		Type:            "dummy",
+		TxQueueLen:      intPtr(20000),
+		IPv4Method:      "disabled",
+		IPv6Method:      "link-local",
+		IPv6AddrGenMode: "eui64",
+	}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if state.DNSResolver == nil {
+		t.Fatalf("dns-resolver should be emitted to clear stale DNS")
+	}
+	if len(state.DNSResolver.Config.Server) != 0 {
+		t.Fatalf("dns servers = %v, want none", state.DNSResolver.Config.Server)
+	}
+
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal state: %v", err)
+	}
+	var encoded map[string]any
+	if err := json.Unmarshal(raw, &encoded); err != nil {
+		t.Fatalf("unmarshal state: %v", err)
+	}
+	resolver, ok := encoded["dns-resolver"].(map[string]any)
+	if !ok {
+		t.Fatalf("encoded state missing dns-resolver: %s", raw)
+	}
+	config, ok := resolver["config"].(map[string]any)
+	if !ok || len(config) != 0 {
+		t.Fatalf("dns-resolver config = %#v, want empty object; json=%s", resolver["config"], raw)
+	}
+}
+
 func TestBuildNMStateIPv4DHCPWithIPv6Static(t *testing.T) {
 	// IPv4 DHCP coexists with a static IPv6 address (different families).
 	state, err := buildNMState([]InterfaceConfig{{

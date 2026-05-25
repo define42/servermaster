@@ -3368,7 +3368,9 @@ func applyTxQueueLengths(interfaces []InterfaceConfig) error {
 // state. It keeps the original validation (name required, ip_address/subnet
 // paired, addresses inside their subnet, parseable gateway/DNS). DNS servers
 // from every interface are merged into nmstate's single global resolver list,
-// de-duplicated in first-seen order.
+// de-duplicated in first-seen order. When no DNS servers are declared, an empty
+// resolver config is emitted so nmstate clears any stale DNS left by a previous
+// config instead of preserving it.
 func buildNMState(interfaces []InterfaceConfig) (*nmState, error) {
 	state := &nmState{}
 	var dnsServers []string
@@ -3400,9 +3402,7 @@ func buildNMState(interfaces []InterfaceConfig) (*nmState, error) {
 		}
 	}
 
-	if len(dnsServers) > 0 {
-		state.DNSResolver = &nmDNS{Config: nmDNSConfig{Server: dnsServers}}
-	}
+	state.DNSResolver = &nmDNS{Config: nmDNSConfig{Server: dnsServers}}
 
 	return state, nil
 }

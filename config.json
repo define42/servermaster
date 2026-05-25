@@ -52,7 +52,8 @@
     },
     {
       "name": "eth1",
-      "ipv4_method": "dhcp"
+      "ipv4_method": "dhcp",
+      "ipv6_method": "disabled"
     }
   ],
   "ostree": {

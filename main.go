@@ -122,6 +122,15 @@ var (
 	startWebServerFunc = startWebServer
 )
 
+// scheduleReboot seams keep the concrete reboot path unit-testable without
+// sleeping or invoking systemctl on the test host.
+//
+//nolint:gochecknoglobals // injectable seams for scheduleReboot tests.
+var (
+	rebootDelay       = time.Second
+	rebootCommandFunc = runCommand
+)
+
 // servermasterStatusCollector gathers the /servermaster/status response. Tests
 // replace it so the handler can be exercised without requiring Podman or ostree.
 //
@@ -196,9 +205,19 @@ var (
 //nolint:gochecknoglobals // injectable seam so interface speed can be tested with a fixture sysfs tree.
 var sysClassNetPath = "/sys/class/net"
 
+type systemdUnitStarter interface {
+	StartUnitContext(ctx context.Context, name string, mode string, ch chan<- string) (int, error)
+	Close()
+}
+
 type dbusConnection interface {
 	Object(dest string, path dbus.ObjectPath) dbus.BusObject
 	Close() error
+}
+
+//nolint:gochecknoglobals // injectable seam so systemd unit starts can be tested with fakes.
+var newSystemdConnectionContextFunc = func(ctx context.Context) (systemdUnitStarter, error) {
+	return systemd.NewSystemConnectionContext(ctx)
 }
 
 //nolint:gochecknoglobals // injectable seams so firewalld D-Bus logic can be tested with fakes.
@@ -1613,10 +1632,10 @@ func runStatusCommand(ctx context.Context, name string, args ...string) ([]byte,
 // scheduleReboot reboots the host after a short grace period so the HTTP
 // response can be flushed to the caller first.
 func scheduleReboot() {
-	time.Sleep(time.Second)
+	time.Sleep(rebootDelay)
 	ctx, cancel := context.WithTimeout(context.Background(), hostCommandTimeout)
 	defer cancel()
-	if err := runCommand(ctx, "systemctl", "reboot"); err != nil {
+	if err := rebootCommandFunc(ctx, "systemctl", "reboot"); err != nil {
 		log.Printf("reboot failed: %v", err)
 	}
 }
@@ -2478,7 +2497,7 @@ func startPodmanSocket() error {
 	ctx, cancel := context.WithTimeout(context.Background(), systemdJobTimeout)
 	defer cancel()
 
-	conn, err := systemd.NewSystemConnectionContext(ctx)
+	conn, err := newSystemdConnectionContextFunc(ctx)
 	if err != nil {
 		return fmt.Errorf("connect to systemd failed: %w", err)
 	}
@@ -2514,7 +2533,7 @@ func ensureFirewalldRunning() error {
 	ctx, cancel := context.WithTimeout(context.Background(), systemdJobTimeout)
 	defer cancel()
 
-	conn, err := systemd.NewSystemConnectionContext(ctx)
+	conn, err := newSystemdConnectionContextFunc(ctx)
 	if err != nil {
 		return fmt.Errorf("connect to systemd failed: %w", err)
 	}

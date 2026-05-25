@@ -50,29 +50,7 @@ var (
 var rebootScheduler = scheduleReboot
 
 func startWebServer(address string, configPath string) (*http.Server, <-chan error, error) {
-	mux := http.NewServeMux()
-	mux.HandleFunc(apiHealthPath, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			w.Header().Set("Allow", "GET")
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = fmt.Fprintln(w, "servermaster running")
-	})
-	mux.HandleFunc(apiStatusPath, func(w http.ResponseWriter, r *http.Request) {
-		handleServermasterStatus(w, r, configPath)
-	})
-	mux.HandleFunc(apiConfigPath, func(w http.ResponseWriter, r *http.Request) {
-		handleConfigUpload(w, r, configPath)
-	})
-	mux.HandleFunc(apiRestartPath, handleRestart)
-	mux.HandleFunc(apiOstreeUploadPath, func(w http.ResponseWriter, r *http.Request) {
-		handleOstreeUpload(w, r, configPath)
-	})
-	mux.HandleFunc(apiOstreeUpgradePath, func(w http.ResponseWriter, r *http.Request) {
-		handleOstreeUpgrade(w, r, configPath)
-	})
+	mux := newServeMux(configPath)
 
 	listener, err := listen(address)
 	if err != nil {
@@ -96,6 +74,36 @@ func startWebServer(address string, configPath string) (*http.Server, <-chan err
 
 	log.Printf("webserver listening on %s", address)
 	return server, errCh, nil
+}
+
+// newServeMux registers the HTTP routes. Method patterns (Go 1.22+) bind each
+// path to its allowed verbs, so the mux returns 405 with an Allow header for a
+// disallowed method on its own and the handlers need not check r.Method. The
+// config and ostree-upload endpoints accept both POST and PUT.
+func newServeMux(configPath string) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET "+apiHealthPath, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = fmt.Fprintln(w, "servermaster running")
+	})
+	mux.HandleFunc("GET "+apiStatusPath, func(w http.ResponseWriter, r *http.Request) {
+		handleServermasterStatus(w, r, configPath)
+	})
+	configUpload := func(w http.ResponseWriter, r *http.Request) {
+		handleConfigUpload(w, r, configPath)
+	}
+	mux.HandleFunc("POST "+apiConfigPath, configUpload)
+	mux.HandleFunc("PUT "+apiConfigPath, configUpload)
+	mux.HandleFunc("POST "+apiRestartPath, handleRestart)
+	ostreeUpload := func(w http.ResponseWriter, r *http.Request) {
+		handleOstreeUpload(w, r, configPath)
+	}
+	mux.HandleFunc("POST "+apiOstreeUploadPath, ostreeUpload)
+	mux.HandleFunc("PUT "+apiOstreeUploadPath, ostreeUpload)
+	mux.HandleFunc("POST "+apiOstreeUpgradePath, func(w http.ResponseWriter, r *http.Request) {
+		handleOstreeUpgrade(w, r, configPath)
+	})
+	return mux
 }
 
 // unixAddressPrefix marks a -listen value as a Unix-domain socket path rather
@@ -168,12 +176,6 @@ func listenUnix(path string) (net.Listener, error) {
 }
 
 func handleServermasterStatus(w http.ResponseWriter, r *http.Request, configPath string) {
-	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", "GET")
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	status := servermasterStatusCollector(r.Context(), configPath)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	encoder := json.NewEncoder(w)
@@ -190,11 +192,6 @@ func handleServermasterStatus(w http.ResponseWriter, r *http.Request, configPath
 // /servermaster/ostree endpoints it is unauthenticated: anyone who can reach
 // :8080 can rewrite the node's folders, interfaces, firewall, and containers.
 func handleConfigUpload(w http.ResponseWriter, r *http.Request, configPath string) {
-	if r.Method != http.MethodPost && r.Method != http.MethodPut {
-		w.Header().Set("Allow", "POST, PUT")
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	defer func() { _ = r.Body.Close() }()
 
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxConfigUploadBytes))
@@ -250,13 +247,7 @@ func handleConfigUpload(w http.ResponseWriter, r *http.Request, configPath strin
 
 // handleRestart schedules a host reboot. It is unauthenticated: anyone who can
 // reach :8080 can reboot the node.
-func handleRestart(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", "POST")
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
+func handleRestart(w http.ResponseWriter, _ *http.Request) {
 	log.Println("restart requested; scheduling reboot")
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	_, _ = fmt.Fprintln(w, "rebooting")
@@ -268,11 +259,6 @@ func handleRestart(w http.ResponseWriter, r *http.Request) {
 // renamed into place so a partial upload can never be applied. The endpoint is
 // unauthenticated: anyone who can reach :8080 can replace the staged image.
 func handleOstreeUpload(w http.ResponseWriter, r *http.Request, configPath string) {
-	if r.Method != http.MethodPost && r.Method != http.MethodPut {
-		w.Header().Set("Allow", "POST, PUT")
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	defer func() { _ = r.Body.Close() }()
 
 	cfg, err := loadConfig(configPath)
@@ -298,12 +284,6 @@ func handleOstreeUpload(w http.ResponseWriter, r *http.Request, configPath strin
 // scheduled after the response is written so the caller gets confirmation. Like
 // the /servermaster/ostree/upload endpoint this is unauthenticated.
 func handleOstreeUpgrade(w http.ResponseWriter, r *http.Request, configPath string) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", "POST")
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	cfg, err := loadConfig(configPath)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("load config: %v", err), http.StatusInternalServerError)

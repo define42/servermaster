@@ -300,15 +300,6 @@ func stubRebootScheduler(fn func()) func() {
 	return func() { rebootScheduler = prev }
 }
 
-func TestHandleServermasterStatusMethodNotAllowed(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPost, apiStatusPath, nil)
-	rec := httptest.NewRecorder()
-	handleServermasterStatus(rec, req, "unused")
-	if rec.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("status = %d, want 405", rec.Code)
-	}
-}
-
 // sampleServermasterStatus is a fully populated status document used to exercise
 // the /servermaster/status handler's encoding.
 func sampleServermasterStatus() servermasterStatus {
@@ -382,15 +373,6 @@ func TestHandleServermasterStatusPrettyJSON(t *testing.T) {
 // validConfigUploadBody is a minimal valid /servermaster/config request body
 // shared by the upload tests.
 const validConfigUploadBody = `{"containers":[{"name":"web","image":"nginx","ports":[{"host_port":8081,"container_port":80}]}]}`
-
-func TestHandleConfigUploadMethodNotAllowed(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, apiConfigPath, nil)
-	rec := httptest.NewRecorder()
-	handleConfigUpload(rec, req, "unused")
-	if rec.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("status = %d, want 405", rec.Code)
-	}
-}
 
 func TestHandleConfigUploadMalformedJSON(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "containers.json")
@@ -496,15 +478,6 @@ func TestHandleConfigUploadApplyFailure(t *testing.T) {
 }
 
 func TestHandleRestart(t *testing.T) {
-	t.Run("method not allowed", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, apiRestartPath, nil)
-		rec := httptest.NewRecorder()
-		handleRestart(rec, req)
-		if rec.Code != http.StatusMethodNotAllowed {
-			t.Fatalf("status = %d, want 405", rec.Code)
-		}
-	})
-
 	t.Run("post schedules reboot", func(t *testing.T) {
 		called := make(chan struct{}, 1)
 		defer stubRebootScheduler(func() { called <- struct{}{} })()
@@ -550,25 +523,7 @@ func TestHandleOstreeUpload(t *testing.T) {
 	}
 }
 
-func TestHandleOstreeUploadMethodNotAllowed(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, apiOstreeUploadPath, nil)
-	rec := httptest.NewRecorder()
-	handleOstreeUpload(rec, req, "unused")
-	if rec.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("status = %d, want 405", rec.Code)
-	}
-}
-
 func TestHandleOstreeUpgrade(t *testing.T) {
-	t.Run("method not allowed", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, apiOstreeUpgradePath, nil)
-		rec := httptest.NewRecorder()
-		handleOstreeUpgrade(rec, req, "unused")
-		if rec.Code != http.StatusMethodNotAllowed {
-			t.Fatalf("status = %d, want 405", rec.Code)
-		}
-	})
-
 	t.Run("no apply command", func(t *testing.T) {
 		cfgPath := writeTempConfig(t, `{}`)
 		req := httptest.NewRequest(http.MethodPost, apiOstreeUpgradePath, nil)

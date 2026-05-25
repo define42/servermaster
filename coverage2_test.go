@@ -67,6 +67,119 @@ func TestStartWebServerBadAddress(t *testing.T) {
 	}
 }
 
+func TestParseListenAddress(t *testing.T) {
+	cases := []struct {
+		in          string
+		wantNetwork string
+		wantAddr    string
+	}{
+		{":8080", "tcp", ":8080"},
+		{"127.0.0.1:8080", "tcp", "127.0.0.1:8080"},
+		{"0.0.0.0:9000", "tcp", "0.0.0.0:9000"},
+		{"unix:///run/servermaster/servermaster.sock", "unix", "/run/servermaster/servermaster.sock"},
+		{"unix:/run/x.sock", "unix", "/run/x.sock"},
+		{"unix://run/x.sock", "unix", "run/x.sock"},
+	}
+	for _, tc := range cases {
+		network, addr := parseListenAddress(tc.in)
+		if network != tc.wantNetwork || addr != tc.wantAddr {
+			t.Errorf("parseListenAddress(%q) = (%q, %q), want (%q, %q)", tc.in, network, addr, tc.wantNetwork, tc.wantAddr)
+		}
+	}
+}
+
+func TestStartWebServerUnixSocket(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "servermaster.sock")
+	cfgPath := writeTempConfig(t, `{}`)
+
+	// "unix://" + an absolute path is the documented URL form.
+	server, errCh, err := startWebServer("unix://"+socketPath, cfgPath)
+	if err != nil {
+		t.Fatalf("startWebServer: %v", err)
+	}
+
+	info, err := os.Stat(socketPath)
+	if err != nil {
+		t.Fatalf("stat socket: %v", err)
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		t.Fatalf("expected a socket at %s, got mode %v", socketPath, info.Mode())
+	}
+	if perm := info.Mode().Perm(); perm != 0o660 {
+		t.Fatalf("socket mode = %#o, want 0660 (not world-accessible)", perm)
+	}
+
+	client := unixHTTPClient(socketPath)
+	resp, err := client.Get("http://unix" + apiHealthPath)
+	if err != nil {
+		t.Fatalf("GET over unix socket: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("health over unix socket = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	if err := server.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("serve returned error: %v", err)
+	}
+	// A graceful close unlinks the socket so the next start binds cleanly.
+	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
+		t.Fatalf("expected socket removed after close, stat err = %v", err)
+	}
+}
+
+func TestListenUnixStaleSocket(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "stale.sock")
+
+	// Simulate the socket an ungraceful exit (SIGTERM) leaves behind: bind it,
+	// then close without unlinking so the file lingers.
+	stale, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("pre-bind stale socket: %v", err)
+	}
+	stale.(*net.UnixListener).SetUnlinkOnClose(false)
+	_ = stale.Close()
+	if _, err := os.Stat(socketPath); err != nil {
+		t.Fatalf("expected stale socket to remain: %v", err)
+	}
+
+	listener, err := listen("unix://" + socketPath)
+	if err != nil {
+		t.Fatalf("listen over stale socket: %v", err)
+	}
+	_ = listener.Close()
+}
+
+func TestListenUnixNonSocketFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "real-data")
+	if err := os.WriteFile(path, []byte("important"), 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	if _, err := listen("unix://" + path); err == nil {
+		t.Fatal("expected error rather than clobbering a non-socket file")
+	}
+	// The regular file must be left untouched.
+	if data, err := os.ReadFile(path); err != nil || string(data) != "important" { //nolint:gosec // test reads a file it just wrote under t.TempDir.
+		t.Fatalf("non-socket file was modified: data=%q err=%v", data, err)
+	}
+}
+
+// unixHTTPClient returns an HTTP client that dials the given Unix-domain socket
+// regardless of the request URL's host.
+func unixHTTPClient(socketPath string) *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
+			},
+		},
+	}
+}
+
 func assertGet(t *testing.T, url string, wantCode int, wantBody string) {
 	t.Helper()
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)

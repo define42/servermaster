@@ -40,8 +40,11 @@ import (
 )
 
 const (
-	defaultConfigPath       = "/etc/servermaster.json"
-	webServerAddress        = ":8080"
+	defaultConfigPath = "/etc/servermaster.json"
+	// defaultListenAddress is the web server's default bind address, used when
+	// -listen is not given. See parseListenAddress for the accepted forms (a
+	// host:port for TCP, or a "unix:" path for a Unix-domain socket).
+	defaultListenAddress    = ":8080"
 	defaultOstreeUploadPath = "/data/ostree/update.tar"
 	podmanRootfulMode       = "rootful"
 	servermasterLogTail     = 100
@@ -527,15 +530,16 @@ func main() {
 	captureServiceLog()
 
 	configPath := flag.String("config", defaultConfigPath, "path to config JSON file")
+	listenAddress := flag.String("listen", defaultListenAddress, `web server listen address: a host:port for TCP (":8080" for all interfaces, "127.0.0.1:8080" for loopback only) or a Unix socket path ("unix:///run/servermaster/servermaster.sock")`)
 	flag.Parse()
 
-	if err := runService(*configPath); err != nil {
+	if err := runService(*listenAddress, *configPath); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func runService(configPath string) error {
-	_, webServerErrors, err := startWebServer(webServerAddress, configPath)
+func runService(listenAddress, configPath string) error {
+	_, webServerErrors, err := startWebServer(listenAddress, configPath)
 	if err != nil {
 		return err
 	}
@@ -584,7 +588,7 @@ func startWebServer(address string, configPath string) (*http.Server, <-chan err
 		handleOstreeUpgrade(w, r, configPath)
 	})
 
-	listener, err := net.Listen("tcp", address)
+	listener, err := listen(address)
 	if err != nil {
 		return nil, nil, fmt.Errorf("start webserver on %s failed: %w", address, err)
 	}
@@ -606,6 +610,75 @@ func startWebServer(address string, configPath string) (*http.Server, <-chan err
 
 	log.Printf("webserver listening on %s", address)
 	return server, errCh, nil
+}
+
+// unixAddressPrefix marks a -listen value as a Unix-domain socket path rather
+// than a TCP host:port. "unix://" is the URL-style form (so "unix:///run/x.sock"
+// yields the absolute path "/run/x.sock"); a bare "unix:" prefix is also
+// accepted.
+const unixAddressPrefix = "unix:"
+
+// parseListenAddress splits a -listen value into a net.Listen network and
+// address. A "unix:"-prefixed value selects a Unix-domain socket and the
+// remainder is its filesystem path; anything else is a TCP host:port. An
+// absolute socket path ("unix:///run/...") is recommended, since a relative one
+// resolves against the process working directory.
+func parseListenAddress(address string) (network, addr string) {
+	if rest, ok := strings.CutPrefix(address, unixAddressPrefix); ok {
+		// Tolerate the "unix://path" URL form by dropping the authority
+		// separator, leaving the path. "unix:///abs" therefore yields "/abs".
+		return "unix", strings.TrimPrefix(rest, "//")
+	}
+	return "tcp", address
+}
+
+// listen binds the web server's listener for a -listen value, dispatching to a
+// Unix-domain socket or a TCP listener.
+func listen(address string) (net.Listener, error) {
+	network, addr := parseListenAddress(address)
+	if network == "unix" {
+		return listenUnix(addr)
+	}
+	return net.Listen(network, addr)
+}
+
+// listenUnix binds a Unix-domain socket at path. It creates the parent
+// directory, clears a stale socket left by an earlier ungraceful exit (systemd
+// SIGTERM kills the process without closing the listener, so the socket file can
+// linger), and restricts the socket to its owner group — the API is
+// root-equivalent, so the socket must not be world-accessible. A non-socket file
+// at path is left untouched and reported, so a misconfigured path cannot clobber
+// real data.
+func listenUnix(path string) (net.Listener, error) {
+	if path == "" {
+		return nil, fmt.Errorf("empty unix socket path")
+	}
+	if dir := filepath.Dir(path); dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // operator-owned socket dir; traversable so the socket path is reachable.
+			return nil, fmt.Errorf("create socket dir %q: %w", dir, err)
+		}
+	}
+
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSocket == 0 {
+			return nil, fmt.Errorf("refusing to remove non-socket file at %q", path)
+		}
+		if err := os.Remove(path); err != nil {
+			return nil, fmt.Errorf("remove stale socket %q: %w", path, err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("stat socket %q: %w", path, err)
+	}
+
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(path, 0o660); err != nil { //nolint:gosec // root-equivalent control socket: 0660 keeps it non-world-accessible while allowing a dedicated owner group to connect.
+		_ = listener.Close()
+		return nil, fmt.Errorf("set socket mode %q: %w", path, err)
+	}
+	return listener, nil
 }
 
 func handleServermasterStatus(w http.ResponseWriter, r *http.Request, configPath string) {

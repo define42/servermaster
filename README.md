@@ -41,6 +41,37 @@ If `-config` is omitted, it defaults to `/etc/servermaster.json`.
 The binary has no `install` subcommand or flag; it always starts the service
 process.
 
+### Listen Address
+
+`-listen` controls where the HTTP API binds (default `:8080`):
+
+- `:8080` — TCP on all interfaces.
+- `127.0.0.1:8080` — TCP on loopback only, so the API is reachable only from
+  the node itself (for example behind an SSH tunnel or a local reverse proxy).
+- `unix:///run/servermaster/servermaster.sock` — a Unix-domain socket. The
+  parent directory is created, a stale socket from an earlier run is cleared,
+  and the socket is mode `0660` (not world-accessible). Use the socket's owning
+  group to grant access. A relative path resolves against the process working
+  directory, so prefer an absolute one.
+
+Because the API is unauthenticated and root-equivalent (see [HTTP API](#http-api)),
+binding to loopback or a Unix socket is the recommended way to keep it off the
+network when a trusted management network is not available. The flag itself
+defaults to `:8080`, but the shipped systemd unit overrides that with a Unix
+socket (see [Systemd Unit](#systemd-unit)).
+
+```sh
+servermaster -config /etc/servermaster.json -listen 127.0.0.1:8080
+servermaster -config /etc/servermaster.json -listen unix:///run/servermaster/servermaster.sock
+```
+
+Reach a Unix-socket listener with `curl --unix-socket` (the host in the URL is
+ignored):
+
+```sh
+curl --unix-socket /run/servermaster/servermaster.sock http://localhost/servermaster/status
+```
+
 ## Installation
 
 ### Systemd Unit
@@ -49,8 +80,15 @@ A systemd unit ships in this repo as
 [`servermaster.service`](servermaster.service). It runs:
 
 ```sh
-/usr/bin/servermaster -config /etc/servermaster.json
+/usr/bin/servermaster -config /etc/servermaster.json -listen unix:///run/servermaster/servermaster.sock
 ```
+
+The unit defaults to a Unix socket at `/run/servermaster/servermaster.sock`
+(its parent directory is created and owned by systemd's
+`RuntimeDirectory=servermaster`, then removed on stop) rather than a TCP port,
+since the API is unauthenticated and root-equivalent. Edit `-listen` to expose
+it over the network — for example `-listen 127.0.0.1:8080` or `-listen :8080`.
+See [Listen Address](#listen-address) for the accepted forms.
 
 For a manual systemd installation, place the binary where the unit expects it,
 then install and enable the unit:
@@ -96,8 +134,11 @@ Tagged GitHub releases attach prebuilt `x86_64` and `aarch64` RPMs.
 
 ## HTTP API
 
-All HTTP endpoints live under `/servermaster/*` and are unauthenticated. Expose
-`:8080` only on a trusted management network.
+All HTTP endpoints live under `/servermaster/*` and are unauthenticated. Anyone
+who can reach the listener can rewrite the node's config, run the ostree apply
+command, and reboot the host — that is, it is root-equivalent. Expose it only on
+a trusted management network, or restrict the listener with `-listen` (loopback
+or a Unix socket; see [Listen Address](#listen-address)).
 
 ### Health
 

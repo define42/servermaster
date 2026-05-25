@@ -65,6 +65,24 @@ const (
 	// request that holds applyMu, indefinitely.
 	nmstateApplyTimeout = 60 * time.Second
 
+	// systemdJobTimeout bounds the wait for a systemd StartUnit job to finish.
+	// StartUnitContext returns once the job is enqueued; its result arrives later
+	// on a channel, so without this bound a unit that hangs in activation would
+	// block the reconcile — which holds applyMu — and every later
+	// /servermaster/config upload, forever.
+	systemdJobTimeout = 60 * time.Second
+
+	// hostCommandTimeout bounds the short host commands run through runCommand
+	// (hostnamectl, systemctl reboot) so a wedged command cannot hang the
+	// reconcile or the restart handler indefinitely.
+	hostCommandTimeout = 30 * time.Second
+
+	// ostreeApplyTimeout bounds the operator-supplied ostree apply_command. An OS
+	// image apply legitimately takes minutes, so the bound is deliberately
+	// generous; it exists only to stop a wedged apply from blocking the upgrade
+	// handler forever.
+	ostreeApplyTimeout = 30 * time.Minute
+
 	// maxConfigUploadBytes caps the body accepted by /servermaster/config. A node
 	// config is a small JSON document; the limit stops an unauthenticated caller
 	// from streaming an arbitrarily large body into memory.
@@ -1171,9 +1189,73 @@ func handleRestart(w http.ResponseWriter, r *http.Request) {
 	go rebootScheduler()
 }
 
+// syncDir fsyncs a directory so a rename into it is durable. os.Rename is atomic
+// — a reader always sees either the old file or the new one, never a partial one
+// — but the directory entry the rename creates is not persisted to disk until
+// the directory itself is flushed. Without this, a power loss (the expected
+// failure mode on edge hardware) right after a rename can lose the rename or
+// surface a zero-length file, even when the file's own contents were fsynced.
+func syncDir(dir string) error {
+	d, err := os.Open(dir) //nolint:gosec // dir is an operator-declared destination directory, not request input.
+	if err != nil {
+		return fmt.Errorf("open dir %q for fsync: %w", dir, err)
+	}
+	if err := d.Sync(); err != nil {
+		_ = d.Close()
+		return fmt.Errorf("fsync dir %q: %w", dir, err)
+	}
+	if err := d.Close(); err != nil {
+		return fmt.Errorf("close dir %q after fsync: %w", dir, err)
+	}
+	return nil
+}
+
+// streamToFileAtomic streams r into a temp file beside dest, fsyncs it, and
+// renames it onto dest, fsyncing the directory afterward so the result survives
+// a power loss and never a partial stream. It returns the number of bytes
+// written. Errors are wrapped with the stage that failed.
+func streamToFileAtomic(dest string, r io.Reader) (int64, error) {
+	dir := filepath.Dir(dest)
+	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // operator-owned staging dir; traversable by design on this single-tenant node.
+		return 0, fmt.Errorf("create upload dir: %w", err)
+	}
+
+	tmp, err := os.CreateTemp(dir, ".upload-*")
+	if err != nil {
+		return 0, fmt.Errorf("create temp file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }() // best-effort; a no-op once the rename succeeds
+
+	written, copyErr := io.Copy(tmp, r)
+	// fsync the staged file before the rename so a power loss right after it
+	// cannot later surface a truncated file.
+	if copyErr == nil {
+		copyErr = tmp.Sync()
+	}
+	closeErr := tmp.Close()
+	if copyErr != nil {
+		return written, fmt.Errorf("write upload: %w", copyErr)
+	}
+	if closeErr != nil {
+		return written, fmt.Errorf("close upload: %w", closeErr)
+	}
+
+	if err := os.Rename(tmpName, dest); err != nil {
+		return written, fmt.Errorf("finalize upload: %w", err)
+	}
+	// fsync the directory so the rename itself is durable across a power loss.
+	if err := syncDir(dir); err != nil {
+		return written, fmt.Errorf("finalize upload: %w", err)
+	}
+	return written, nil
+}
+
 // writeConfigFile writes the config body to a temp file in the destination
 // directory and renames it into place, so a crash mid-write can never leave a
-// truncated config where the next boot would load it.
+// truncated config where the next boot would load it. The temp file and the
+// destination directory are fsynced around the rename so the new config also
+// survives a power loss, not just a clean crash.
 func writeConfigFile(path string, body []byte) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // operator-owned config dir; traversable by design on this single-tenant node.
@@ -1187,24 +1269,30 @@ func writeConfigFile(path string, body []byte) error {
 	tmpName := tmp.Name()
 	defer func() { _ = os.Remove(tmpName) }() // best-effort; a no-op once the rename succeeds
 
-	_, writeErr := tmp.Write(body)
-	closeErr := tmp.Close()
-	if writeErr != nil {
-		return fmt.Errorf("write config: %w", writeErr)
+	if _, err := tmp.Write(body); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write config: %w", err)
 	}
-	if closeErr != nil {
-		return fmt.Errorf("close config: %w", closeErr)
-	}
-
-	if err := os.Chmod(tmpName, 0o644); err != nil { //nolint:gosec // config is intentionally world-readable for operator inspection on the node.
+	// config is intentionally world-readable for operator inspection on the node.
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
 		return fmt.Errorf("set config mode: %w", err)
+	}
+	// fsync the contents (and mode) before the rename so a power loss right after
+	// it cannot surface a zero-length or stale config on the next boot.
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sync config: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close config: %w", err)
 	}
 
 	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("finalize config: %w", err)
 	}
 
-	return nil
+	return syncDir(dir)
 }
 
 // handleOstreeUpload streams the request body to the configured upload path.
@@ -1226,33 +1314,9 @@ func handleOstreeUpload(w http.ResponseWriter, r *http.Request, configPath strin
 	}
 
 	dest := ostreeUploadPath(cfg)
-	dir := filepath.Dir(dest)
-	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // operator-owned staging dir; traversable by design on this single-tenant node.
-		http.Error(w, fmt.Sprintf("create upload dir: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	tmp, err := os.CreateTemp(dir, ".upload-*")
+	written, err := streamToFileAtomic(dest, r.Body)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("create temp file: %v", err), http.StatusInternalServerError)
-		return
-	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }() // best-effort; a no-op once the rename succeeds
-
-	written, copyErr := io.Copy(tmp, r.Body)
-	closeErr := tmp.Close()
-	if copyErr != nil {
-		http.Error(w, fmt.Sprintf("write upload: %v", copyErr), http.StatusInternalServerError)
-		return
-	}
-	if closeErr != nil {
-		http.Error(w, fmt.Sprintf("close upload: %v", closeErr), http.StatusInternalServerError)
-		return
-	}
-
-	if err := os.Rename(tmpName, dest); err != nil {
-		http.Error(w, fmt.Sprintf("finalize upload: %v", err), http.StatusInternalServerError)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -1287,7 +1351,12 @@ func handleOstreeUpgrade(w http.ResponseWriter, r *http.Request, configPath stri
 
 	command := cfg.Ostree.ApplyCommand
 	log.Printf("applying ostree update: %s", strings.Join(command, " "))
-	if err := runCommand(command[0], command[1:]...); err != nil {
+	// Bound the apply off context.Background(), not the request context, so it
+	// runs to completion even if the caller disconnects, while still being capped
+	// so a wedged apply cannot block the handler forever.
+	ctx, cancel := context.WithTimeout(context.Background(), ostreeApplyTimeout)
+	defer cancel()
+	if err := runCommand(ctx, command[0], command[1:]...); err != nil {
 		log.Printf("ostree apply failed: %v", err)
 		http.Error(w, fmt.Sprintf("apply update failed: %v", err), http.StatusInternalServerError)
 		return
@@ -1506,7 +1575,9 @@ func runStatusCommand(ctx context.Context, name string, args ...string) ([]byte,
 // response can be flushed to the caller first.
 func scheduleReboot() {
 	time.Sleep(time.Second)
-	if err := runCommand("systemctl", "reboot"); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), hostCommandTimeout)
+	defer cancel()
+	if err := runCommand(ctx, "systemctl", "reboot"); err != nil {
 		log.Printf("reboot failed: %v", err)
 	}
 }
@@ -1851,7 +1922,9 @@ func ensureHostname(hostname string) error {
 		return nil
 	}
 
-	if err := runCommand("hostnamectl", "set-hostname", hostname); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), hostCommandTimeout)
+	defer cancel()
+	if err := runCommand(ctx, "hostnamectl", "set-hostname", hostname); err != nil {
 		return fmt.Errorf("set hostname to %q failed: %w", hostname, err)
 	}
 
@@ -2363,7 +2436,8 @@ func ensurePermanentFirewallPort(conn *dbus.Conn, firewalld, config dbus.BusObje
 }
 
 func startPodmanSocket() error {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), systemdJobTimeout)
+	defer cancel()
 
 	conn, err := systemd.NewSystemConnectionContext(ctx)
 	if err != nil {
@@ -2373,17 +2447,22 @@ func startPodmanSocket() error {
 
 	ch := make(chan string, 1)
 
-	_, err = conn.StartUnitContext(ctx, "podman.socket", "replace", ch)
-	if err != nil {
+	if _, err := conn.StartUnitContext(ctx, "podman.socket", "replace", ch); err != nil {
 		return fmt.Errorf("start podman.socket failed: %w", err)
 	}
 
-	result := <-ch
-	if result != "done" {
-		return fmt.Errorf("podman.socket start result: %s", result)
+	// StartUnitContext returns once the job is enqueued; the completion result
+	// arrives on ch. Bound the wait so a job that hangs in activation cannot
+	// block the reconcile (and applyMu) forever.
+	select {
+	case result := <-ch:
+		if result != "done" {
+			return fmt.Errorf("podman.socket start result: %s", result)
+		}
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("start podman.socket timed out: %w", ctx.Err())
 	}
-
-	return nil
 }
 
 // ensureFirewalldRunning starts firewalld.service through systemd so its D-Bus
@@ -2393,7 +2472,8 @@ func startPodmanSocket() error {
 // bus name has been acquired, and starting an already-active unit is a no-op. An
 // error means firewalld is absent, masked, or failed to start.
 func ensureFirewalldRunning() error {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), systemdJobTimeout)
+	defer cancel()
 
 	conn, err := systemd.NewSystemConnectionContext(ctx)
 	if err != nil {
@@ -2407,12 +2487,18 @@ func ensureFirewalldRunning() error {
 		return fmt.Errorf("start firewalld.service failed: %w", err)
 	}
 
-	result := <-ch
-	if result != "done" {
-		return fmt.Errorf("firewalld.service start result: %s", result)
+	// StartUnitContext returns once the job is enqueued; the completion result
+	// arrives on ch. Bound the wait so a job that hangs in activation cannot
+	// block the reconcile (and applyMu) forever.
+	select {
+	case result := <-ch:
+		if result != "done" {
+			return fmt.Errorf("firewalld.service start result: %s", result)
+		}
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("start firewalld.service timed out: %w", ctx.Err())
 	}
-
-	return nil
 }
 
 func waitForUnixSocket(path string, timeout time.Duration) error {
@@ -3400,6 +3486,12 @@ func configureHostInterfaces(interfaces []InterfaceConfig) error {
 		_ = tmp.Close()
 		return fmt.Errorf("chmod temp nmstate document %q failed: %w", tmpPath, err)
 	}
+	// fsync before the apply and rename so a power loss cannot leave
+	// nmstate.service a zero-length or stale document to reapply at boot.
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sync temp nmstate document %q failed: %w", tmpPath, err)
+	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temp nmstate document %q failed: %w", tmpPath, err)
 	}
@@ -3414,6 +3506,11 @@ func configureHostInterfaces(interfaces []InterfaceConfig) error {
 
 	if err := os.Rename(tmpPath, nmstateStatePath); err != nil {
 		return fmt.Errorf("commit nmstate document to %q failed: %w", nmstateStatePath, err)
+	}
+
+	// fsync the directory so the rename is durable across a power loss.
+	if err := syncDir(filepath.Dir(nmstateStatePath)); err != nil {
+		return fmt.Errorf("sync nmstate dir failed: %w", err)
 	}
 
 	// nmstate has no transmit-queue-length field, so apply it through netlink
@@ -3775,23 +3872,18 @@ func parseAddr(addr string) (net.IP, error) {
 	return net.IP(parsed.AsSlice()), nil
 }
 
-func runCommand(name string, args ...string) error {
-	cmd := exec.Command(name, args...) //nolint:gosec // runs operator-declared host commands (e.g. ostree.apply_command); managing the host is this tool's purpose.
-	output, err := cmd.CombinedOutput()
-	if err == nil {
-		return nil
-	}
-
-	message := strings.TrimSpace(string(output))
-	if message == "" {
-		return fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
-	}
-
-	return fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, message)
+// runCommand runs a host command and returns its error, discarding output. It
+// delegates to runCommandOutput so callers must pass a context: a bounded one
+// stops a wedged command (hostnamectl, systemctl reboot, the operator-supplied
+// ostree apply_command) from blocking its caller — and any applyMu it holds —
+// indefinitely.
+func runCommand(ctx context.Context, name string, args ...string) error {
+	_, err := runCommandOutput(ctx, name, args...)
+	return err
 }
 
 func runCommandOutput(ctx context.Context, name string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // runs fixed status/apply commands (nmstatectl, rpm-ostree, …), not request input.
+	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // runs fixed tool commands (nmstatectl, rpm-ostree, hostnamectl, systemctl) and the operator-declared ostree.apply_command; managing the host is this tool's purpose, and none of it is request input.
 	output, err := cmd.CombinedOutput()
 	if err == nil {
 		return output, nil

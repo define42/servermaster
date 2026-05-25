@@ -330,6 +330,15 @@ func TestWriteConfigFileMkdirError(t *testing.T) {
 	}
 }
 
+func TestSyncDir(t *testing.T) {
+	if err := syncDir(t.TempDir()); err != nil {
+		t.Fatalf("syncDir on a real directory: %v", err)
+	}
+	if err := syncDir(filepath.Join(t.TempDir(), "does-not-exist")); err == nil {
+		t.Fatal("expected error fsyncing a missing directory")
+	}
+}
+
 func TestHandleConfigUploadTooLarge(t *testing.T) {
 	big := strings.Repeat("a", (1<<20)+16)
 	req := httptest.NewRequest(http.MethodPost, apiConfigPath, strings.NewReader(big))

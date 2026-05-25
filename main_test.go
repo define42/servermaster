@@ -557,6 +557,119 @@ func TestBuildNMStateIPv6Gateway(t *testing.T) {
 	}
 }
 
+func TestBuildNMStateIPv6LinkLocal(t *testing.T) {
+	// The nmcli equivalent: ipv6.method link-local, ipv6.addr-gen-mode eui64.
+	state, err := buildNMState([]InterfaceConfig{{
+		Name:            "ens1f1np1",
+		IPv6Method:      "link-local",
+		IPv6AddrGenMode: "eui64",
+	}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	iface := state.Interfaces[0]
+	if iface.IPv4 != nil {
+		t.Fatalf("ipv6_method should leave ipv4 untouched: %+v", iface.IPv4)
+	}
+	if iface.IPv6 == nil {
+		t.Fatalf("ipv6_method link-local should build an ipv6 stack")
+	}
+	if !iface.IPv6.Enabled || iface.IPv6.DHCP {
+		t.Fatalf("link-local stack should be enabled with dhcp off: %+v", iface.IPv6)
+	}
+	if iface.IPv6.Autoconf == nil || *iface.IPv6.Autoconf {
+		t.Fatalf("link-local stack should set autoconf false: %+v", iface.IPv6)
+	}
+	if len(iface.IPv6.Addresses) != 0 {
+		t.Fatalf("link-local stack should carry no addresses: %+v", iface.IPv6.Addresses)
+	}
+	if iface.IPv6.AddrGenMode != "eui64" {
+		t.Fatalf("addr-gen-mode = %q, want eui64", iface.IPv6.AddrGenMode)
+	}
+}
+
+func TestBuildNMStateIPv6Methods(t *testing.T) {
+	cases := []struct {
+		method   string
+		enabled  bool
+		dhcp     bool
+		autoconf *bool
+	}{
+		{"auto", true, true, boolPtr(true)},
+		{"dhcp", true, true, boolPtr(false)},
+		{"disabled", false, false, nil},
+	}
+	for _, tt := range cases {
+		t.Run(tt.method, func(t *testing.T) {
+			state, err := buildNMState([]InterfaceConfig{{Name: "eth0", IPv6Method: tt.method}})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			ipv6 := state.Interfaces[0].IPv6
+			if ipv6 == nil {
+				t.Fatalf("ipv6_method %q should build an ipv6 stack", tt.method)
+			}
+			if ipv6.Enabled != tt.enabled || ipv6.DHCP != tt.dhcp {
+				t.Fatalf("stack = %+v, want enabled=%v dhcp=%v", ipv6, tt.enabled, tt.dhcp)
+			}
+			if !reflect.DeepEqual(ipv6.Autoconf, tt.autoconf) {
+				t.Fatalf("autoconf = %v, want %v", ipv6.Autoconf, tt.autoconf)
+			}
+		})
+	}
+}
+
+func TestBuildNMStateIPv6AddrGenModeOnStatic(t *testing.T) {
+	// addr-gen-mode attaches to the stack a static IPv6 ip_address builds.
+	state, err := buildNMState([]InterfaceConfig{{
+		Name:            "eth0",
+		IPAddress:       "2001:db8::10",
+		Subnet:          "2001:db8::/64",
+		IPv6AddrGenMode: "stable-privacy",
+	}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	ipv6 := state.Interfaces[0].IPv6
+	if ipv6 == nil || ipv6.AddrGenMode != "stable-privacy" {
+		t.Fatalf("addr-gen-mode should attach to the static ipv6 stack: %+v", ipv6)
+	}
+	if len(ipv6.Addresses) != 1 || ipv6.Addresses[0].IP != "2001:db8::10" {
+		t.Fatalf("static address should survive: %+v", ipv6.Addresses)
+	}
+}
+
+func TestBuildNMStateIPv4StaticWithIPv6LinkLocal(t *testing.T) {
+	// A static IPv4 address coexists with an IPv6 link-local method.
+	state, err := buildNMState([]InterfaceConfig{{
+		Name:       "eth0",
+		IPAddress:  "192.168.1.10",
+		Subnet:     "192.168.1.0/24",
+		IPv6Method: "link-local",
+	}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	iface := state.Interfaces[0]
+	if iface.IPv4 == nil || iface.IPv4.Addresses[0].IP != "192.168.1.10" {
+		t.Fatalf("ipv4 static address mismatch: %+v", iface.IPv4)
+	}
+	if iface.IPv6 == nil || !iface.IPv6.Enabled || iface.IPv6.DHCP {
+		t.Fatalf("ipv6 link-local stack mismatch: %+v", iface.IPv6)
+	}
+}
+
+func TestBuildNMStateIPv6Errors(t *testing.T) {
+	assertBuildNMStateErrors(t, []nmStateErrorCase{
+		{"unknown method", InterfaceConfig{Name: "eth0", IPv6Method: "bogus"}},
+		{"unknown addr-gen-mode", InterfaceConfig{Name: "eth0", IPv6Method: "link-local", IPv6AddrGenMode: "random"}},
+		{"method conflicts with static v6", InterfaceConfig{Name: "eth0", IPAddress: "2001:db8::10", Subnet: "2001:db8::/64", IPv6Method: "link-local"}},
+		{"addr-gen-mode without ipv6", InterfaceConfig{Name: "eth0", IPv6AddrGenMode: "eui64"}},
+		{"addr-gen-mode with disabled ipv6", InterfaceConfig{Name: "eth0", IPv6Method: "disabled", IPv6AddrGenMode: "eui64"}},
+	})
+}
+
 func TestBuildNMStateDNSMerge(t *testing.T) {
 	state, err := buildNMState([]InterfaceConfig{
 		{Name: "eth0", DNS: []string{"1.1.1.1", "8.8.8.8"}},
@@ -583,6 +696,8 @@ func TestBuildNMStateErrors(t *testing.T) {
 }
 
 func intPtr(n int) *int { return &n }
+
+func boolPtr(b bool) *bool { return &b }
 
 // device builds a fake netlink link for tests. netlink.Device.Type() reports
 // "device", matching what LinkList returns for a physical interface.

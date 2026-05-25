@@ -44,6 +44,11 @@
         "base_interface": "eth0",
         "id": 100
       }
+    },
+    {
+      "name": "ens1f1np1",
+      "ipv6_method": "link-local",
+      "ipv6_addr_gen_mode": "eui64"
     }
   ],
   "ostree": {

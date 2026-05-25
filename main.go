@@ -241,6 +241,18 @@ type InterfaceConfig struct {
 	Subnet    string   `json:"subnet"`
 	Gateway   string   `json:"gateway"`
 	DNS       []string `json:"dns"`
+	// IPv6Method mirrors NetworkManager's ipv6.method for interfaces without a
+	// static IPv6 ip_address. "" leaves IPv6 at nmstate's default; "link-local"
+	// enables IPv6 with only the auto-generated link-local address (no DHCPv6,
+	// no SLAAC global address); "auto" uses SLAAC/DHCPv6; "dhcp" uses DHCPv6
+	// only; "disabled" turns IPv6 off. It is mutually exclusive with a static
+	// IPv6 ip_address, which is itself the "manual" method.
+	IPv6Method string `json:"ipv6_method,omitempty"`
+	// IPv6AddrGenMode mirrors nmcli's ipv6.addr-gen-mode, selecting how the IPv6
+	// interface identifier is generated: "eui64" or "stable-privacy". "" leaves
+	// it at nmstate's default. It requires IPv6 to be enabled, via IPv6Method or
+	// a static IPv6 ip_address.
+	IPv6AddrGenMode string `json:"ipv6_addr_gen_mode,omitempty"`
 	// TxQueueLen, when set, is the transmit queue length applied to the interface
 	// (the txqueuelen `ip link` reports). nmstate has no field for it, so it is
 	// applied via netlink after the nmstate apply. A nil value leaves it untouched.
@@ -2987,9 +2999,16 @@ type nmVLAN struct {
 }
 
 type nmIPStack struct {
-	Enabled   bool        `json:"enabled"`
-	DHCP      bool        `json:"dhcp"`
-	Addresses []nmAddress `json:"address,omitempty"`
+	Enabled bool `json:"enabled"`
+	DHCP    bool `json:"dhcp"`
+	// Autoconf is the IPv6 SLAAC toggle. It is a pointer so it is only emitted
+	// when an ipv6_method explicitly sets it; nil leaves it (and IPv4, which has
+	// no such concept) out of the document.
+	Autoconf *bool `json:"autoconf,omitempty"`
+	// AddrGenMode is the IPv6 addr-gen-mode (eui64 or stable-privacy); empty for
+	// IPv4 and for IPv6 stacks that leave it at nmstate's default.
+	AddrGenMode string      `json:"addr-gen-mode,omitempty"`
+	Addresses   []nmAddress `json:"address,omitempty"`
 }
 
 type nmAddress struct {
@@ -3450,7 +3469,75 @@ func buildNMInterface(iface InterfaceConfig, label string) (nmInterface, error) 
 		}
 	}
 
+	if err := applyIPv6Settings(&nmIface, iface, label); err != nil {
+		return nmInterface{}, err
+	}
+
 	return nmIface, nil
+}
+
+// ipv6MethodStack builds the nmstate IPv6 stack for a supported ipv6_method,
+// each mirroring a NetworkManager ipv6.method. It reports false for an
+// unrecognized method so the caller can reject it.
+func ipv6MethodStack(method string) (*nmIPStack, bool) {
+	on, off := true, false
+	switch method {
+	case "link-local":
+		// IPv6 up with only the auto-generated link-local address.
+		return &nmIPStack{Enabled: true, DHCP: false, Autoconf: &off}, true
+	case "auto":
+		// SLAAC plus DHCPv6, the router-advertisement-driven default.
+		return &nmIPStack{Enabled: true, DHCP: true, Autoconf: &on}, true
+	case "dhcp":
+		// DHCPv6 only, without SLAAC.
+		return &nmIPStack{Enabled: true, DHCP: true, Autoconf: &off}, true
+	case "disabled":
+		return &nmIPStack{Enabled: false, DHCP: false}, true
+	default:
+		return nil, false
+	}
+}
+
+// validIPv6AddrGenMode reports whether mode is an addr-gen-mode nmstate accepts.
+func validIPv6AddrGenMode(mode string) bool {
+	switch mode {
+	case "eui64", "stable-privacy":
+		return true
+	default:
+		return false
+	}
+}
+
+// applyIPv6Settings layers the optional ipv6_method and ipv6_addr_gen_mode onto
+// nmIface. The static-address path in buildNMInterface has already run, so
+// nmIface.IPv6 is non-nil exactly when a static IPv6 ip_address was declared
+// (the "manual" method), which ipv6_method must not contradict.
+func applyIPv6Settings(nmIface *nmInterface, iface InterfaceConfig, label string) error {
+	method := strings.TrimSpace(iface.IPv6Method)
+	genMode := strings.TrimSpace(iface.IPv6AddrGenMode)
+
+	if method != "" {
+		if nmIface.IPv6 != nil {
+			return fmt.Errorf("host interface %s sets ipv6_method %q together with a static IPv6 ip_address; they are mutually exclusive", label, method)
+		}
+		stack, ok := ipv6MethodStack(method)
+		if !ok {
+			return fmt.Errorf("host interface %s has invalid ipv6_method %q (want link-local, auto, dhcp, or disabled)", label, method)
+		}
+		nmIface.IPv6 = stack
+	}
+
+	if genMode != "" {
+		if !validIPv6AddrGenMode(genMode) {
+			return fmt.Errorf("host interface %s has invalid ipv6_addr_gen_mode %q (want eui64 or stable-privacy)", label, genMode)
+		}
+		if nmIface.IPv6 == nil || !nmIface.IPv6.Enabled {
+			return fmt.Errorf("host interface %s sets ipv6_addr_gen_mode %q but IPv6 is not enabled; set ipv6_method or a static IPv6 ip_address", label, genMode)
+		}
+		nmIface.IPv6.AddrGenMode = genMode
+	}
+
+	return nil
 }
 
 // interfaceVLAN validates and builds an interface's VLAN settings. It returns

@@ -261,6 +261,20 @@ list.
 - `subnet`: subnet CIDR for the host interface
 - `gateway`: default gateway IP for the host interface
 - `dns`: DNS server list for the host interface
+- `ipv6_method`: optional IPv6 addressing mode for interfaces without a static
+  IPv6 `ip_address`, mirroring NetworkManager's `ipv6.method`:
+  - `link-local`: enable IPv6 with only the auto-generated link-local address
+    (no DHCPv6, no SLAAC global address)
+  - `auto`: SLAAC plus DHCPv6 (the router-advertisement default)
+  - `dhcp`: DHCPv6 only, without SLAAC
+  - `disabled`: turn IPv6 off
+
+  It is mutually exclusive with a static IPv6 `ip_address` (which is the
+  `manual` method). It does not touch IPv4, so an IPv4 `ip_address` can be set
+  alongside it.
+- `ipv6_addr_gen_mode`: optional IPv6 interface-identifier generation mode,
+  mirroring `ipv6.addr-gen-mode`: `eui64` or `stable-privacy`. Requires IPv6 to
+  be enabled, via `ipv6_method` or a static IPv6 `ip_address`.
 - `txqueuelen`: optional transmit queue length (`0`–`4294967295`). nmstate has no
   field for it, so it is applied via netlink after the nmstate apply and
   reapplied on each reconcile; omitting it leaves the interface's queue length
@@ -279,6 +293,19 @@ exist and be NetworkManager-managed.
   "ip_address": "192.168.100.10",
   "subnet": "192.168.100.0/24",
   "vlan": { "base_interface": "eth0", "id": 100 }
+}
+```
+
+An IPv6 link-local-only interface with EUI-64 addressing — the declarative
+equivalent of `nmcli connection modify ens1f1np1 ipv6.method link-local
+ipv6.addr-gen-mode eui64 connection.autoconnect yes` (autoconnect comes for
+free, since nmstate writes a persisted profile that comes up on boot):
+
+```json
+{
+  "name": "ens1f1np1",
+  "ipv6_method": "link-local",
+  "ipv6_addr_gen_mode": "eui64"
 }
 ```
 

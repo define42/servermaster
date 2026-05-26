@@ -88,42 +88,6 @@ curl --unix-socket /run/servermaster/servermaster.sock http://localhost/serverma
 
 ## Installation
 
-### Systemd Unit
-
-A systemd unit ships in this repo as
-[`servermaster.service`](servermaster.service). It runs:
-
-```sh
-/usr/bin/servermaster -config /etc/servermaster.json -listen unix:///run/servermaster/servermaster.sock
-```
-
-The unit defaults to a Unix socket at `/run/servermaster/servermaster.sock`
-(its parent directory is created and owned by systemd's
-`RuntimeDirectory=servermaster`, then removed on stop) rather than a TCP port,
-since the API is unauthenticated and root-equivalent. Edit `-listen` to expose
-it over the network — for example `-listen 127.0.0.1:8080` or `-listen :8080`.
-See [Listen Address](#listen-address) for the accepted forms.
-
-For a manual systemd installation, place the binary where the unit expects it,
-then install and enable the unit:
-
-```sh
-make build
-sudo install -m 0755 dist/servermaster /usr/bin/servermaster
-sudo install -m 0644 servermaster.service /etc/systemd/system/servermaster.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now servermaster.service
-```
-
-On image-mode hosts, such as Red Hat Device Edge images built from a blueprint,
-prefer the RPM flow below. Bake the package into the image and enable the unit
-declaratively:
-
-```toml
-[customizations.services]
-enabled = ["servermaster.service"]
-```
-
 ### RPM
 
 `make rpm` builds a static, CGO-free binary and packages it with the systemd unit

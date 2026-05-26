@@ -17,9 +17,14 @@ import (
 
 const (
 	// defaultListenAddress is the web server's default bind address, used when
-	// -listen is not given. See parseListenAddress for the accepted forms (a
-	// host:port for TCP, or a "unix:" path for a Unix-domain socket).
-	defaultListenAddress = ":8080"
+	// -listen is not given. Because the API is unauthenticated and
+	// root-equivalent (see HTTP API in the README), it defaults to a Unix-domain
+	// socket (mode 0660, not world-accessible) rather than a TCP port, so running
+	// the binary without an explicit -listen never exposes the host on the
+	// network — "fail safe" does not depend on the shipped systemd unit. Override
+	// it with -listen for a host:port on a trusted management network. See
+	// parseListenAddress for the accepted forms.
+	defaultListenAddress = "unix:///run/servermaster/servermaster.sock"
 	apiHealthPath        = "/servermaster/health"
 	apiStatusPath        = "/servermaster/status"
 	apiConfigPath        = "/servermaster/config"
@@ -190,7 +195,7 @@ func handleServermasterStatus(w http.ResponseWriter, r *http.Request, configPath
 // same reconcile that runs at startup). The validated body is what lands on
 // disk, so a successful upload becomes the new source of truth. Like the
 // /servermaster/ostree endpoints it is unauthenticated: anyone who can reach
-// :8080 can rewrite the node's folders, interfaces, firewall, and containers.
+// the listener can rewrite the node's folders, interfaces, firewall, and containers.
 func handleConfigUpload(w http.ResponseWriter, r *http.Request, configPath string) {
 	defer func() { _ = r.Body.Close() }()
 
@@ -246,7 +251,7 @@ func handleConfigUpload(w http.ResponseWriter, r *http.Request, configPath strin
 }
 
 // handleRestart schedules a host reboot. It is unauthenticated: anyone who can
-// reach :8080 can reboot the node.
+// reach the listener can reboot the node.
 func handleRestart(w http.ResponseWriter, _ *http.Request) {
 	log.Println("restart requested; scheduling reboot")
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -257,7 +262,7 @@ func handleRestart(w http.ResponseWriter, _ *http.Request) {
 // handleOstreeUpload streams the request body to the configured upload path.
 // The body is written to a temp file in the destination directory and then
 // renamed into place so a partial upload can never be applied. The endpoint is
-// unauthenticated: anyone who can reach :8080 can replace the staged image.
+// unauthenticated: anyone who can reach the listener can replace the staged image.
 func handleOstreeUpload(w http.ResponseWriter, r *http.Request, configPath string) {
 	defer func() { _ = r.Body.Close() }()
 

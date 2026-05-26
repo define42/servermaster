@@ -18,7 +18,7 @@ import (
 const (
 	packageName     = "servermaster"
 	summary         = "Podman container reconciler and node configuration service"
-	description     = "servermaster reads a JSON node configuration and reconciles host folders, host network interfaces (through nmstate), firewalld ports, and the Podman containers that should be present. It also serves /servermaster/status, /servermaster/restart, and /servermaster/ostree OS-update endpoints on port 8080."
+	description     = "servermaster reads a JSON node configuration and reconciles host folders, host network interfaces (through nmstate), firewalld ports, and the Podman containers that should be present. It also serves /servermaster/status, /servermaster/restart, and /servermaster/ostree OS-update endpoints over its -listen address, which defaults to a local Unix socket."
 	url             = "https://github.com/define42/servermaster"
 	licence         = "Apache-2.0"
 	unitDestination = "/usr/lib/systemd/system/servermaster.service"

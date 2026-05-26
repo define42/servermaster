@@ -2,7 +2,8 @@
 // configuration: it manages host folders and files, host network interfaces
 // (through nmstate), firewalld ports, and the Podman containers that should be
 // present, treating config.json as the single source of truth for node state.
-// It also serves a status endpoint and the ostree OS-update endpoints on :8080.
+// It also serves a status endpoint and the ostree OS-update endpoints over the
+// -listen address, which defaults to a local Unix socket.
 package main
 
 import (

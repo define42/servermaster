@@ -14,7 +14,8 @@ config instead.
 
 On startup, and after a successful remote config upload, `servermaster`:
 
-1. Starts an HTTP server on `:8080`.
+1. Starts the HTTP API on the `-listen` address (a Unix socket by default; see
+   [Listen Address](#listen-address)).
 2. Reads the active JSON config file.
 3. Creates declared host folders with the requested mode and owner.
 4. Writes declared files (creating parent directories) with the requested mode
@@ -57,7 +58,8 @@ otherwise. Use it to check a `config.json` before deploying it.
 
 ### Listen Address
 
-`-listen` controls where the HTTP API binds (default `:8080`):
+`-listen` controls where the HTTP API binds (default
+`unix:///run/servermaster/servermaster.sock`):
 
 - `:8080` — TCP on all interfaces.
 - `127.0.0.1:8080` — TCP on loopback only, so the API is reachable only from
@@ -69,10 +71,11 @@ otherwise. Use it to check a `config.json` before deploying it.
   directory, so prefer an absolute one.
 
 Because the API is unauthenticated and root-equivalent (see [HTTP API](#http-api)),
-binding to loopback or a Unix socket is the recommended way to keep it off the
-network when a trusted management network is not available. The flag itself
-defaults to `:8080`, but the shipped systemd unit overrides that with a Unix
-socket (see [Systemd Unit](#systemd-unit)).
+it defaults to a Unix socket, which keeps it off the network entirely: running the
+binary without an explicit `-listen` is safe no matter how it is launched, not just
+under the shipped systemd unit (which passes the same socket path). Set a `host:port`
+only to expose the API on a trusted management network, and prefer loopback
+(`127.0.0.1:8080`) over all interfaces (`:8080`) when you do.
 
 ```sh
 servermaster -config /etc/servermaster.json -listen 127.0.0.1:8080
@@ -117,6 +120,10 @@ who can reach the listener can rewrite the node's config, run the ostree apply
 command, and reboot the host — that is, it is root-equivalent. Expose it only on
 a trusted management network, or restrict the listener with `-listen` (loopback
 or a Unix socket; see [Listen Address](#listen-address)).
+
+The `curl http://node:8080/...` examples below assume a TCP `-listen`. With the
+default Unix socket, reach the same endpoints with
+`curl --unix-socket /run/servermaster/servermaster.sock http://localhost/...`.
 
 ### Health
 

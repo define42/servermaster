@@ -179,23 +179,15 @@ func TestLoadConfigBadJSON(t *testing.T) {
 }
 
 func TestValidateConfigFile(t *testing.T) {
-	dir := t.TempDir()
-
 	t.Run("valid file", func(t *testing.T) {
-		path := filepath.Join(dir, "valid.json")
-		if err := os.WriteFile(path, []byte(`{"podman_mode":"rootful","firewall_ports":[{"zone":"public","port":"8080","protocol":"tcp"}]}`), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		path := writeTempConfig(t, `{"podman_mode":"rootful","firewall_ports":[{"zone":"public","port":"8080","protocol":"tcp"}]}`)
 		if err := validateConfigFile(path); err != nil {
 			t.Fatalf("validateConfigFile(%q) = %v, want nil", path, err)
 		}
 	})
 
 	t.Run("invalid config", func(t *testing.T) {
-		path := filepath.Join(dir, "invalid.json")
-		if err := os.WriteFile(path, []byte(`{"firewall_ports":[{"port":"70000"}]}`), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		path := writeTempConfig(t, `{"firewall_ports":[{"port":"70000"}]}`)
 		err := validateConfigFile(path)
 		if err == nil {
 			t.Fatal("validateConfigFile expected error on invalid config")
@@ -206,17 +198,14 @@ func TestValidateConfigFile(t *testing.T) {
 	})
 
 	t.Run("malformed json", func(t *testing.T) {
-		path := filepath.Join(dir, "bad.json")
-		if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		path := writeTempConfig(t, "{not json")
 		if err := validateConfigFile(path); err == nil {
 			t.Fatal("validateConfigFile expected error on malformed JSON")
 		}
 	})
 
 	t.Run("missing file", func(t *testing.T) {
-		if err := validateConfigFile(filepath.Join(dir, "missing.json")); err == nil {
+		if err := validateConfigFile(filepath.Join(t.TempDir(), "missing.json")); err == nil {
 			t.Fatal("validateConfigFile expected error on missing file")
 		}
 	})

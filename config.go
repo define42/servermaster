@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -97,6 +98,7 @@ type FirewallPortConfig struct {
 	Zone     string `json:"zone"`
 	Port     string `json:"port"`
 	Protocol string `json:"protocol"`
+	Source   string `json:"source,omitempty"`
 }
 
 type PortConfig struct {
@@ -264,6 +266,9 @@ func validateFirewallPortConfigs(ports []FirewallPortConfig) error {
 		if err := validateFirewallProtocol(port.Protocol); err != nil {
 			return fmt.Errorf("invalid firewall protocol for port %s: %w", portLabel, err)
 		}
+		if err := validateFirewallSource(port.Source); err != nil {
+			return fmt.Errorf("invalid firewall source for port %s: %w", portLabel, err)
+		}
 	}
 	return nil
 }
@@ -362,4 +367,18 @@ func validateFirewallProtocol(protocol string) error {
 	default:
 		return fmt.Errorf("protocol must be tcp, udp, sctp, or dccp")
 	}
+}
+
+func validateFirewallSource(source string) error {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return nil
+	}
+	if _, err := netip.ParseAddr(source); err == nil {
+		return nil
+	}
+	if _, err := netip.ParsePrefix(source); err == nil {
+		return nil
+	}
+	return fmt.Errorf("source must be a valid IP address or CIDR")
 }

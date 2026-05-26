@@ -20,9 +20,9 @@ On startup, and after a successful remote config upload, `servermaster`:
 4. Writes declared files (creating parent directories) with the requested mode
    and owner.
 5. Applies declared host interface settings through `nmstatectl`.
-6. Starts `firewalld.service`, opens declared firewalld ports in runtime and
-   permanent configuration, then closes any undeclared port and removes every
-   firewalld service (ports become the only way anything is open).
+6. Starts `firewalld.service`, opens declared firewalld ports (and optional
+   source-restricted rich rules) in runtime and permanent configuration, then
+   closes any undeclared port/rich rule and removes every firewalld service.
 7. Starts the rootful `podman.socket` through systemd.
 8. Waits for the Podman Unix socket to become reachable.
 9. Stops running containers that are not declared in the config.
@@ -373,19 +373,20 @@ An interface that leases its IPv4 address over DHCP:
 
 ### Firewall Ports
 
-Firewall ports are opened through firewalld's D-Bus API. Each port is written to
-both runtime configuration for immediate effect and permanent configuration for
-reload and reboot persistence. An empty `zone` uses firewalld's default zone.
-`servermaster` starts `firewalld.service` first (firewalld is not D-Bus
-activatable on a default install), so a stopped firewalld is brought up
-automatically rather than failing the apply.
+Firewall ports are opened through firewalld's D-Bus API. Each declaration is
+written to both runtime configuration for immediate effect and permanent
+configuration for reload and reboot persistence. An empty `zone` uses
+firewalld's default zone. `servermaster` starts `firewalld.service` first
+(firewalld is not D-Bus activatable on a default install), so a stopped
+firewalld is brought up automatically rather than failing the apply.
 
 `firewall_ports` is the single source of truth for the entire firewall surface:
 on every reconcile `servermaster` closes any port open in firewalld — in any
 zone, in both runtime and permanent config — that is not declared here, and
 **removes every firewalld service** (for example `ssh`, `cockpit`, `dhcpv6-client`),
-just as it stops undeclared containers. Access is expressed only as ports, so an
-empty (or omitted) `firewall_ports` closes everything.
+just as it stops undeclared containers. Access is expressed as ports (optionally
+bound to a remote source), so an empty (or omitted) `firewall_ports` closes
+everything.
 
 > **Warning — SSH lockout.** The default zone allows SSH through the `ssh`
 > *service*, not a port. Because services are stripped, SSH survives a reconcile
@@ -400,6 +401,9 @@ ports are declared it is an error, since the config cannot be satisfied.
 - `zone`: optional firewalld zone
 - `port`: port or port range as a string, for example `8080` or `8000-8010`
 - `protocol`: protocol; `tcp` default, supports `tcp`, `udp`, `sctp`, and `dccp`
+- `source`: optional remote source IP or CIDR (for example `10.0.0.10` or
+  `10.0.0.0/24`); when set, servermaster uses a firewalld rich rule so only
+  traffic from that source can reach the port
 
 ### Ostree
 

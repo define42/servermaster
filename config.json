@@ -3,14 +3,14 @@
   "hostname": "node1.example.com",
   "folders": [
     {
-      "path": "/data/web",
+      "path": "/var/data/web",
       "chmod": "0755",
       "user": "0:0"
     }
   ],
   "files": [
     {
-      "path": "/data/web/index.html",
+      "path": "/var/data/web/index.html",
       "chmod": "0644",
       "user": "0:0",
       "content": "<h1>Hello, world!</h1>\n",
@@ -73,16 +73,6 @@
       "metric": 100
     }
   ],
-  "ostree": {
-    "upload_path": "/data/ostree/update.tar",
-    "apply_command": [
-      "bootc",
-      "switch",
-      "--transport",
-      "oci-archive",
-      "/data/ostree/update.tar"
-    ]
-  },
   "firewall_ports": [
     {
       "zone": "public",
@@ -115,7 +105,7 @@
       ],
       "volumes": [
         {
-          "host_path": "/data/web",
+          "host_path": "/var/data/web",
           "container_path": "/usr/share/nginx/html",
           "read_only": true,
           "selinux": "Z"

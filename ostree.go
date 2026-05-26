@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	defaultOstreeUploadPath = "/data/ostree/update.tar"
+	defaultOstreeUploadPath = "/var/data/ostree/update.tar"
 	statusCommandTimeout    = 5 * time.Second
 	// ostreeApplyTimeout bounds the operator-supplied ostree apply_command. An OS
 	// image apply legitimately takes minutes, so the bound is deliberately
@@ -50,6 +50,18 @@ func ostreeUploadPath(cfg *Config) string {
 		}
 	}
 	return defaultOstreeUploadPath
+}
+
+// ostreeApplyCommand returns the argv the upgrade endpoint runs to apply the
+// staged image. An operator-declared ostree.apply_command wins; otherwise it
+// defaults to a bootc image-mode switch onto the resolved upload path, so a
+// standard Device Edge node needs no ostree config at all. Nodes that are not
+// bootc-based (e.g. rpm-ostree) must declare apply_command to override this.
+func ostreeApplyCommand(cfg *Config) []string {
+	if cfg != nil && cfg.Ostree != nil && len(cfg.Ostree.ApplyCommand) > 0 {
+		return cfg.Ostree.ApplyCommand
+	}
+	return []string{"bootc", "switch", "--transport", "oci-archive", ostreeUploadPath(cfg)}
 }
 
 func collectOstreeStatus(ctx context.Context) (ostreeStatus, error) {

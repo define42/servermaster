@@ -704,8 +704,8 @@ func TestCreateSpec(t *testing.T) {
 			{HostIP: "127.0.0.1", HostPort: 9000, ContainerPort: 9000, Protocol: "udp"},
 		},
 		Volumes: []VolumeConfig{
-			{HostPath: "/data/web", ContainerPath: "/usr/share/nginx/html", ReadOnly: true, SELinux: "Z"},
-			{HostPath: "/data/cache", ContainerPath: "/cache", ReadOnly: false},
+			{HostPath: "/var/data/web", ContainerPath: "/usr/share/nginx/html", ReadOnly: true, SELinux: "Z"},
+			{HostPath: "/var/data/cache", ContainerPath: "/cache", ReadOnly: false},
 		},
 		Restart: "always",
 	}
@@ -735,7 +735,7 @@ func TestCreateSpec(t *testing.T) {
 	if !reflect.DeepEqual(spec.Mounts[1].Options, []string{"rbind", "rw"}) {
 		t.Fatalf("read-write mount options = %v, want [rbind rw]", spec.Mounts[1].Options)
 	}
-	if spec.Mounts[0].Type != "bind" || spec.Mounts[0].Source != "/data/web" || spec.Mounts[0].Destination != "/usr/share/nginx/html" {
+	if spec.Mounts[0].Type != "bind" || spec.Mounts[0].Source != "/var/data/web" || spec.Mounts[0].Destination != "/usr/share/nginx/html" {
 		t.Fatalf("mount mapping mismatch: %+v", spec.Mounts[0])
 	}
 

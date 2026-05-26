@@ -284,10 +284,12 @@ func handleOstreeUpload(w http.ResponseWriter, r *http.Request, configPath strin
 	_, _ = fmt.Fprintf(w, "uploaded %d bytes to %s\n", written, dest)
 }
 
-// handleOstreeUpgrade runs the configured apply command and, unless the request
-// sets ?reboot=false, reboots the host once the command succeeds. The reboot is
-// scheduled after the response is written so the caller gets confirmation. Like
-// the /servermaster/ostree/upload endpoint this is unauthenticated.
+// handleOstreeUpgrade runs the apply command — the operator-declared
+// ostree.apply_command, or the default bootc image-mode switch onto the upload
+// path — and, unless the request sets ?reboot=false, reboots the host once the
+// command succeeds. The reboot is scheduled after the response is written so the
+// caller gets confirmation. Like the /servermaster/ostree/upload endpoint this
+// is unauthenticated.
 func handleOstreeUpgrade(w http.ResponseWriter, r *http.Request, configPath string) {
 	cfg, err := loadConfig(configPath)
 	if err != nil {
@@ -295,14 +297,9 @@ func handleOstreeUpgrade(w http.ResponseWriter, r *http.Request, configPath stri
 		return
 	}
 
-	if cfg.Ostree == nil || len(cfg.Ostree.ApplyCommand) == 0 {
-		http.Error(w, "no ostree.apply_command configured", http.StatusBadRequest)
-		return
-	}
-
 	reboot := r.URL.Query().Get("reboot") != "false"
 
-	command := cfg.Ostree.ApplyCommand
+	command := ostreeApplyCommand(cfg)
 	log.Printf("applying ostree update: %s", strings.Join(command, " "))
 	// Bound the apply off context.Background(), not the request context, so it
 	// runs to completion even if the caller disconnects, while still being capped

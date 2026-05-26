@@ -195,11 +195,12 @@ The OS update endpoints stage and apply an ostree/bootc update tarball:
   `ostree.upload_path`. The body is written to a temporary file and renamed into
   place after upload.
 - `POST /servermaster/ostree/upgrade` runs `ostree.apply_command` and reboots
-  the host after a successful apply.
+  the host after a successful apply. When `apply_command` is not configured it
+  defaults to a bootc image-mode switch onto the upload path, so no `ostree`
+  config is required on a standard bootc node.
 
 Pass `?reboot=false` to `/servermaster/ostree/upgrade` to apply without
-rebooting. `/servermaster/ostree/upgrade` returns `400` when no `apply_command`
-is configured.
+rebooting.
 
 ```sh
 curl --data-binary @update.tar http://node:8080/servermaster/ostree/upload
@@ -255,7 +256,7 @@ directories created as needed. Content comes from the config itself.
 ```json
 "files": [
   {
-    "path": "/data/web/hello",
+    "path": "/var/data/web/hello",
     "chmod": "0644",
     "user": "0:0",
     "content": "Hello, world!\n",
@@ -448,16 +449,15 @@ ports are declared it is an error, since the config cannot be satisfied.
 
 ### Ostree
 
+The whole `ostree` block is optional; omit it and the defaults below apply, so a
+standard bootc (image-mode) Device Edge node needs no ostree config.
+
 - `upload_path`: where `/servermaster/ostree/upload` writes the uploaded image;
-  default `/data/ostree/update.tar`
+  defaults to `/var/data/ostree/update.tar`
 - `apply_command`: argv list run by `/servermaster/ostree/upgrade` to apply the
-  staged image
-
-Example `apply_command`:
-
-```json
-["bootc", "switch", "--transport", "oci-archive", "/data/ostree/update.tar"]
-```
+  staged image; defaults to a bootc image-mode switch onto the upload path:
+  `["bootc", "switch", "--transport", "oci-archive", "<upload_path>"]`. Override
+  this on non-bootc (rpm-ostree) nodes.
 
 ### Containers
 

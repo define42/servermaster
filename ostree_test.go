@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"net"
+	"reflect"
 	"testing"
 )
 
@@ -190,6 +191,38 @@ func TestOstreeUploadPath(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := ostreeUploadPath(tt.cfg); got != tt.want {
 				t.Fatalf("ostreeUploadPath() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestOstreeApplyCommand(t *testing.T) {
+	defaultCmd := []string{"bootc", "switch", "--transport", "oci-archive", defaultOstreeUploadPath}
+
+	tests := []struct {
+		name string
+		cfg  *Config
+		want []string
+	}{
+		{"nil config", nil, defaultCmd},
+		{"no ostree section", &Config{}, defaultCmd},
+		{"empty apply command", &Config{Ostree: &OstreeConfig{}}, defaultCmd},
+		{
+			"default targets custom upload path",
+			&Config{Ostree: &OstreeConfig{UploadPath: "/srv/img.tar"}},
+			[]string{"bootc", "switch", "--transport", "oci-archive", "/srv/img.tar"},
+		},
+		{
+			"explicit apply command wins",
+			&Config{Ostree: &OstreeConfig{ApplyCommand: []string{"rpm-ostree", "rebase", "foo"}}},
+			[]string{"rpm-ostree", "rebase", "foo"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ostreeApplyCommand(tt.cfg); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("ostreeApplyCommand() = %v, want %v", got, tt.want)
 			}
 		})
 	}

@@ -524,16 +524,6 @@ func TestHandleOstreeUpload(t *testing.T) {
 }
 
 func TestHandleOstreeUpgrade(t *testing.T) {
-	t.Run("no apply command", func(t *testing.T) {
-		cfgPath := writeTempConfig(t, `{}`)
-		req := httptest.NewRequest(http.MethodPost, apiOstreeUpgradePath, nil)
-		rec := httptest.NewRecorder()
-		handleOstreeUpgrade(rec, req, cfgPath)
-		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
-		}
-	})
-
 	// reboot=false keeps the reboot path from firing during the test.
 	t.Run("apply succeeds without reboot", func(t *testing.T) {
 		cfgPath := writeTempConfig(t, `{"ostree":{"apply_command":["true"]}}`)

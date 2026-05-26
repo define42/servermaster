@@ -115,6 +115,32 @@ func TestValidateFirewallProtocol(t *testing.T) {
 	}
 }
 
+func TestValidateFirewallSource(t *testing.T) {
+	tests := []struct {
+		name    string
+		source  string
+		wantErr bool
+	}{
+		{"empty allowed", "", false},
+		{"ipv4", "10.0.0.10", false},
+		{"ipv6", "2001:db8::10", false},
+		{"ipv4 cidr", "10.0.0.0/24", false},
+		{"ipv6 cidr", "2001:db8::/64", false},
+		{"trims whitespace", " 10.0.0.0/24 ", false},
+		{"invalid", "not-an-ip", true},
+		{"bad cidr", "10.0.0.0/99", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateFirewallSource(tt.source)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validateFirewallSource(%q) error = %v, wantErr %v", tt.source, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestValidateSELinuxRelabel(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -256,6 +282,7 @@ func TestValidateConfigResourceErrors(t *testing.T) {
 	assertValidateConfigErrors(t, []validateConfigCase{
 		{name: "bad firewall port", cfg: &Config{FirewallPorts: []FirewallPortConfig{{Port: "70000"}}}, want: "firewall port"},
 		{name: "bad firewall protocol", cfg: &Config{FirewallPorts: []FirewallPortConfig{{Port: "8080", Protocol: "icmp"}}}, want: "protocol"},
+		{name: "bad firewall source", cfg: &Config{FirewallPorts: []FirewallPortConfig{{Port: "8080", Source: "invalid"}}}, want: "source"},
 		{name: "folder missing path", cfg: &Config{Folders: []FolderConfig{{Chmod: "0755"}}}, want: "missing path"},
 		{name: "folder bad chmod", cfg: &Config{Folders: []FolderConfig{{Path: "/data", Chmod: "99999"}}}, want: "chmod"},
 		{name: "file missing path", cfg: &Config{Files: []FileConfig{{Content: "hi"}}}, want: "missing path"},

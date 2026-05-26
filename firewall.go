@@ -95,27 +95,34 @@ func openDeclaredFirewallPort(conn dbusConnection, firewalld, config dbus.BusObj
 	if protocol == "" {
 		protocol = "tcp"
 	}
-	if source != "" {
-		rule, err := firewallRichRule(source, portValue, protocol)
-		if err != nil {
-			return fmt.Errorf("build firewall rich rule for source %q failed: %w", source, err)
-		}
-		enabled, err := queryFirewallRichRule(firewalld, zone, rule)
-		if err != nil {
-			return fmt.Errorf("query firewall rich rule %q failed: %w", rule, err)
-		}
-		if !enabled {
-			if err := addFirewallRichRule(firewalld, zone, rule); err != nil {
-				return fmt.Errorf("open firewall rich rule %q failed: %w", rule, err)
-			}
-			log.Printf("opened firewall rich rule %q", rule)
-		}
-		if err := ensurePermanentFirewallRichRule(conn, firewalld, config, zone, rule); err != nil {
-			return fmt.Errorf("persist firewall rich rule %q failed: %w", rule, err)
-		}
-		return nil
+	if source == "" {
+		return openDeclaredPlainFirewallPort(conn, firewalld, config, zone, portValue, protocol)
 	}
+	return openDeclaredSourceFirewallPort(conn, firewalld, config, zone, source, portValue, protocol)
+}
 
+func openDeclaredSourceFirewallPort(conn dbusConnection, firewalld, config dbus.BusObject, zone, source, portValue, protocol string) error {
+	rule, err := firewallRichRule(source, portValue, protocol)
+	if err != nil {
+		return fmt.Errorf("build firewall rich rule for source %q failed: %w", source, err)
+	}
+	enabled, err := queryFirewallRichRule(firewalld, zone, rule)
+	if err != nil {
+		return fmt.Errorf("query firewall rich rule %q failed: %w", rule, err)
+	}
+	if !enabled {
+		if err := addFirewallRichRule(firewalld, zone, rule); err != nil {
+			return fmt.Errorf("open firewall rich rule %q failed: %w", rule, err)
+		}
+		log.Printf("opened firewall rich rule %q", rule)
+	}
+	if err := ensurePermanentFirewallRichRule(conn, firewalld, config, zone, rule); err != nil {
+		return fmt.Errorf("persist firewall rich rule %q failed: %w", rule, err)
+	}
+	return nil
+}
+
+func openDeclaredPlainFirewallPort(conn dbusConnection, firewalld, config dbus.BusObject, zone, portValue, protocol string) error {
 	// Runtime config takes effect immediately, without a firewalld reload.
 	enabled, err := queryFirewallPort(firewalld, zone, portValue, protocol)
 	if err != nil {
@@ -263,6 +270,16 @@ func removeUnmanagedRuntimeRules(firewalld dbus.BusObject, declared map[string]d
 }
 
 func pruneRuntimeZone(firewalld dbus.BusObject, zone string, declared declaredFirewallZone) error {
+	if err := pruneRuntimeZonePorts(firewalld, zone, declared); err != nil {
+		return err
+	}
+	if err := pruneRuntimeZoneRichRules(firewalld, zone, declared); err != nil {
+		return err
+	}
+	return pruneRuntimeZoneServices(firewalld, zone)
+}
+
+func pruneRuntimeZonePorts(firewalld dbus.BusObject, zone string, declared declaredFirewallZone) error {
 	var current [][]string
 	if err := firewalld.Call(firewalldZoneInterface+".getPorts", 0, zone).Store(&current); err != nil {
 		return fmt.Errorf("list runtime ports for zone %q failed: %w", zone, err)
@@ -281,7 +298,10 @@ func pruneRuntimeZone(firewalld dbus.BusObject, zone string, declared declaredFi
 		}
 		log.Printf("closed unmanaged firewall port %s/%s in zone %s", port, protocol, zone)
 	}
+	return nil
+}
 
+func pruneRuntimeZoneRichRules(firewalld dbus.BusObject, zone string, declared declaredFirewallZone) error {
 	var richRules []string
 	if err := firewalld.Call(firewalldZoneInterface+".getRichRules", 0, zone).Store(&richRules); err != nil {
 		return fmt.Errorf("list runtime rich rules for zone %q failed: %w", zone, err)
@@ -296,7 +316,10 @@ func pruneRuntimeZone(firewalld dbus.BusObject, zone string, declared declaredFi
 		}
 		log.Printf("removed unmanaged firewall rich rule %q in zone %s", rule, zone)
 	}
+	return nil
+}
 
+func pruneRuntimeZoneServices(firewalld dbus.BusObject, zone string) error {
 	var services []string
 	if err := firewalld.Call(firewalldZoneInterface+".getServices", 0, zone).Store(&services); err != nil {
 		return fmt.Errorf("list runtime services for zone %q failed: %w", zone, err)
@@ -333,6 +356,16 @@ func prunePermanentZone(conn dbusConnection, config dbus.BusObject, zone string,
 	}
 	zoneObject := conn.Object(firewalldBusName, zonePath)
 
+	if err := prunePermanentZonePorts(zoneObject, zone, declared); err != nil {
+		return err
+	}
+	if err := prunePermanentZoneRichRules(zoneObject, zone, declared); err != nil {
+		return err
+	}
+	return prunePermanentZoneServices(zoneObject, zone)
+}
+
+func prunePermanentZonePorts(zoneObject dbus.BusObject, zone string, declared declaredFirewallZone) error {
 	var current []firewallPortTuple
 	if err := zoneObject.Call(firewalldConfigZoneInterface+".getPorts", 0).Store(&current); err != nil {
 		return fmt.Errorf("list permanent ports for zone %q failed: %w", zone, err)
@@ -346,7 +379,10 @@ func prunePermanentZone(conn dbusConnection, config dbus.BusObject, zone string,
 		}
 		log.Printf("removed unmanaged permanent firewall port %s/%s in zone %s", pp.Port, pp.Protocol, zone)
 	}
+	return nil
+}
 
+func prunePermanentZoneRichRules(zoneObject dbus.BusObject, zone string, declared declaredFirewallZone) error {
 	var richRules []string
 	if err := zoneObject.Call(firewalldConfigZoneInterface+".getRichRules", 0).Store(&richRules); err != nil {
 		return fmt.Errorf("list permanent rich rules for zone %q failed: %w", zone, err)
@@ -360,7 +396,10 @@ func prunePermanentZone(conn dbusConnection, config dbus.BusObject, zone string,
 		}
 		log.Printf("removed unmanaged permanent firewall rich rule %q in zone %s", rule, zone)
 	}
+	return nil
+}
 
+func prunePermanentZoneServices(zoneObject dbus.BusObject, zone string) error {
 	var services []string
 	if err := zoneObject.Call(firewalldConfigZoneInterface+".getServices", 0).Store(&services); err != nil {
 		return fmt.Errorf("list permanent services for zone %q failed: %w", zone, err)

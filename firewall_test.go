@@ -219,6 +219,9 @@ func TestDeclaredFirewallPorts(t *testing.T) {
 	if _, ok := internal["53/udp"]; !ok || len(internal) != 1 {
 		t.Fatalf("internal zone = %v, want only 53/udp", internal)
 	}
+	if _, ok := internal["8080/tcp"]; ok {
+		t.Fatalf("source-restricted internal port should not be tracked as plain port: %v", internal)
+	}
 	internalRich := declared["internal"].richRules
 	if _, ok := internalRich[`rule family="ipv4" source address="10.0.0.0/24" port port="8080" protocol="tcp" accept`]; !ok || len(internalRich) != 1 {
 		t.Fatalf("internal rich rules = %v, want source-restricted rule", internalRich)

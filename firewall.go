@@ -186,7 +186,7 @@ func firewallSourceFamily(source string) (family, normalized string, err error) 
 	}
 	prefix, parseErr := netip.ParsePrefix(source)
 	if parseErr != nil {
-		return "", "", parseErr
+		return "", "", fmt.Errorf("invalid source address or CIDR %q: %w", source, parseErr)
 	}
 	family = "ipv4"
 	if prefix.Addr().Is6() {

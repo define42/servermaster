@@ -205,6 +205,19 @@ func loadConfig(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+// validateConfigFile loads the config at path and runs the full config
+// validation against it without converging the host or touching any other
+// system state. It backs the -validatefile CLI flag, so an operator can check a
+// config.json before deploying it. It reports the file's load error, the first
+// validation error found, or nil when the file parses and every field validates.
+func validateConfigFile(path string) error {
+	cfg, err := loadConfig(path)
+	if err != nil {
+		return err
+	}
+	return validateConfig(cfg)
+}
+
 func validateConfig(cfg *Config) error {
 	if mode := strings.TrimSpace(cfg.PodmanMode); mode != "" && mode != podmanRootfulMode {
 		return fmt.Errorf("podman_mode must be %q or empty", podmanRootfulMode)

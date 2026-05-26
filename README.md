@@ -41,6 +41,20 @@ If `-config` is omitted, it defaults to `/etc/servermaster.json`.
 The binary has no `install` subcommand or flag; it always starts the service
 process.
 
+### Validating a Config
+
+`-validatefile` runs the same validation the service applies before converging
+the host, but against the named file only — it parses the JSON, checks every
+field, and exits without starting the web server or changing the host:
+
+```sh
+servermaster -validatefile config.json
+```
+
+It prints `config config.json is valid` and exits `0` when the file parses and
+every field validates, or prints the first error to stderr and exits `1`
+otherwise. Use it to check a `config.json` before deploying it.
+
 ### Listen Address
 
 `-listen` controls where the HTTP API binds (default `:8080`):

@@ -157,7 +157,7 @@ type declaredFirewallZone struct {
 func firewallRichRule(source, port, protocol string) (string, error) {
 	source = strings.TrimSpace(source)
 	if source == "" {
-		return "", fmt.Errorf("missing source")
+		return "", fmt.Errorf("source must be a valid IP address or CIDR")
 	}
 	protocol = strings.ToLower(strings.TrimSpace(protocol))
 	if protocol == "" {

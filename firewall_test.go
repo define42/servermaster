@@ -198,7 +198,10 @@ func TestDeclaredFirewallPorts(t *testing.T) {
 		{Port: "8080", Protocol: "tcp"}, // duplicate of the first
 	}
 
-	declared := declaredFirewallPorts(ports, "public")
+	declared, err := declaredFirewallPorts(ports, "public")
+	if err != nil {
+		t.Fatalf("declaredFirewallPorts: %v", err)
+	}
 
 	// The empty-zone 8080/tcp and the explicit public 443/tcp both land in public.
 	public := declared["public"].ports

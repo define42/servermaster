@@ -74,7 +74,10 @@ func configureFirewallPorts(ports []FirewallPortConfig) error {
 		}
 	}
 
-	declared := declaredFirewallPorts(ports, defaultZone)
+	declared, err := declaredFirewallPorts(ports, defaultZone)
+	if err != nil {
+		return err
+	}
 	if err := removeUnmanagedFirewallRules(conn, firewalld, config, declared); err != nil {
 		return err
 	}
@@ -200,7 +203,7 @@ func firewallPortKey(port, protocol string) string {
 // per-zone sets of plain "port/proto" keys and source-restricted rich rules. An
 // empty zone resolves to defaultZone, the same substitution firewalld makes when
 // a rule is opened without a zone.
-func declaredFirewallPorts(ports []FirewallPortConfig, defaultZone string) map[string]declaredFirewallZone {
+func declaredFirewallPorts(ports []FirewallPortConfig, defaultZone string) (map[string]declaredFirewallZone, error) {
 	declared := make(map[string]declaredFirewallZone)
 	for _, port := range ports {
 		zone := strings.TrimSpace(port.Zone)
@@ -220,13 +223,13 @@ func declaredFirewallPorts(ports []FirewallPortConfig, defaultZone string) map[s
 		} else {
 			rule, err := firewallRichRule(source, port.Port, port.Protocol)
 			if err != nil {
-				continue
+				return nil, fmt.Errorf("build firewall rich rule for source %q failed: %w", source, err)
 			}
 			zoneDeclared.richRules[rule] = struct{}{}
 		}
 		declared[zone] = zoneDeclared
 	}
-	return declared
+	return declared, nil
 }
 
 // removeUnmanagedFirewallRules enforces config.json as the single source of

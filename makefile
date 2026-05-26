@@ -8,6 +8,7 @@ UNIT   := servermaster.service
 # the tree has no tags. Override with: make rpm VERSION=1.2.3
 GIT_VERSION := $(shell git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')
 VERSION     ?= $(if $(GIT_VERSION),$(GIT_VERSION),0.0.0)
+GO_VERSION  := $(shell sed -n 's/^go //p' go.mod | head -1)
 
 # Target architecture. GOARCH builds the binary; RPM_ARCH tags the package.
 GOARCH   ?= $(shell go env GOARCH)
@@ -18,7 +19,7 @@ test:
 	@go tool cover -func=coverage.out | tail -1
 
 lint:
-	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run
+	GOTOOLCHAIN=go$(GO_VERSION) go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run
 
 govulncheck:
 	./scripts/govulncheck-gate.sh

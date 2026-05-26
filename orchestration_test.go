@@ -80,7 +80,7 @@ func installHostApplySeams(calls *[]string) {
 		*calls = append(*calls, "files")
 		return nil
 	}
-	configureHostInterfacesFunc = func([]InterfaceConfig) error {
+	configureHostInterfacesFunc = func([]InterfaceConfig, []RouteConfig) error {
 		*calls = append(*calls, "interfaces")
 		return nil
 	}
@@ -280,7 +280,7 @@ func TestApplyConfigStopsOnStepErrors(t *testing.T) {
 		{"hostname", func() { ensureHostnameFunc = func(string) error { return sentinel } }},
 		{"folders", func() { ensureFoldersFunc = func([]FolderConfig) error { return sentinel } }},
 		{"files", func() { ensureFilesFunc = func([]FileConfig) error { return sentinel } }},
-		{"interfaces", func() { configureHostInterfacesFunc = func([]InterfaceConfig) error { return sentinel } }},
+		{"interfaces", func() { configureHostInterfacesFunc = func([]InterfaceConfig, []RouteConfig) error { return sentinel } }},
 		{"firewall", func() { configureFirewallPortsFunc = func([]FirewallPortConfig) error { return sentinel } }},
 		{"podman socket", func() { startPodmanSocketFunc = func() error { return sentinel } }},
 		{"socket wait", func() { waitForUnixSocketFunc = func(string, time.Duration) error { return sentinel } }},

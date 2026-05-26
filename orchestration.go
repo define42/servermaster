@@ -108,7 +108,7 @@ func applyConfig(cfg *Config) error {
 		return err
 	}
 
-	if err := configureHostInterfacesFunc(cfg.Interfaces); err != nil {
+	if err := configureHostInterfacesFunc(cfg.Interfaces, cfg.Routes); err != nil {
 		return err
 	}
 

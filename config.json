@@ -57,6 +57,22 @@
       "ipv6_method": "disabled"
     }
   ],
+  "routes": [
+    {
+      "name": "corp-net",
+      "destination": "10.0.0.0/8",
+      "next_hop_interface": "eth0",
+      "next_hop_address": "192.168.1.1"
+    },
+    {
+      "name": "vlan100-default",
+      "destination": "0.0.0.0/0",
+      "next_hop_interface": "eth0.100",
+      "next_hop_address": "192.168.100.1",
+      "table_id": 100,
+      "metric": 100
+    }
+  ],
   "ostree": {
     "upload_path": "/data/ostree/update.tar",
     "apply_command": [

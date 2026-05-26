@@ -229,6 +229,7 @@ Top-level fields:
 - `hostname`: optional static hostname for the node (see [Hostname](#hostname))
 - `folders`: optional list of host folders to create
 - `interfaces`: optional list of host interface settings
+- `routes`: optional list of static routes (default routes and routing tables)
 - `firewall_ports`: optional list of firewalld ports to open
 - `containers`: list of container definitions
 - `ostree`: optional OS update settings for the `/servermaster/ostree/*` endpoints
@@ -371,6 +372,61 @@ An interface that leases its IPv4 address over DHCP:
 }
 ```
 
+### Routes
+
+Static routes are applied through NetworkManager with `nmstatectl`, in the same
+desired-state document as the interfaces (`/etc/nmstate/servermaster.yml`), so
+they persist across reboots and are reapplied by `nmstate.service`. Routes
+declared here are **additive** to the per-interface default route derived from an
+interface's `gateway`: use `gateway` for a simple default route, and `routes` for
+additional static routes, default routes on a non-main table, or routes that need
+an explicit metric.
+
+Each route is applied to the interface named in `next_hop_interface`; that
+interface need not be declared under `interfaces` (it may be DHCP-managed or
+pre-existing), but it must exist and be NetworkManager-managed.
+
+- `name`: optional human-readable label for the route. nmstate has no per-route
+  name, so it is not applied to the kernel; it documents the route and is used to
+  identify it in validation error messages.
+- `destination`: target network in CIDR form — `0.0.0.0/0` or `::/0` for a
+  default route, or a specific network such as `10.0.0.0/8`. Host bits are
+  normalized to the network address.
+- `next_hop_interface`: the egress interface for the route (required)
+- `next_hop_address`: optional gateway the route forwards through; omit it for an
+  on-link route reached directly over `next_hop_interface`. When set it must be
+  the same IP family as `destination`.
+- `table_id`: optional kernel routing table to install the route in
+  (`0`–`4294967295`), mirroring nmstate's route `table-id`. Omitting it (or `0`)
+  uses the main table (254). A non-main table is only consulted when a routing
+  policy rule (`ip rule`) directs traffic to it; declaring such rules is out of
+  scope here.
+- `metric`: optional route priority (`0`–`4294967295`); lower wins among routes
+  to the same destination. Omitting it lets nmstate and the kernel pick the
+  default.
+
+A specific static route through a gateway, plus a default route placed in routing
+table 100 with a metric:
+
+```json
+"routes": [
+  {
+    "name": "corp-net",
+    "destination": "10.0.0.0/8",
+    "next_hop_interface": "eth0",
+    "next_hop_address": "192.168.1.1"
+  },
+  {
+    "name": "vlan100-default",
+    "destination": "0.0.0.0/0",
+    "next_hop_interface": "eth0.100",
+    "next_hop_address": "192.168.100.1",
+    "table_id": 100,
+    "metric": 100
+  }
+]
+```
+
 ### Firewall Ports
 
 Firewall ports are opened through firewalld's D-Bus API. Each declaration is
@@ -464,5 +520,5 @@ already labeled `container_file_t`.
 ## Example Config
 
 See [`config.json`](config.json) for a complete example with folders, host
-interface settings, firewall ports, container ports, volumes, and OS update
-settings.
+interface settings, routes, firewall ports, container ports, volumes, and OS
+update settings.

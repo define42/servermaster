@@ -85,8 +85,14 @@ type nmRoutes struct {
 
 type nmRoute struct {
 	Destination      string `json:"destination"`
-	NextHopAddress   string `json:"next-hop-address"`
+	NextHopAddress   string `json:"next-hop-address,omitempty"`
 	NextHopInterface string `json:"next-hop-interface"`
+	// TableID and Metric mirror nmstate's route table-id and metric. They are
+	// pointers so they are emitted only when explicitly set; the gateway-derived
+	// default routes leave them out and so land in the main table at the default
+	// metric, exactly as before.
+	TableID *int `json:"table-id,omitempty"`
+	Metric  *int `json:"metric,omitempty"`
 }
 
 type nmDNS struct {
@@ -97,18 +103,25 @@ type nmDNSConfig struct {
 	Server []string `json:"server,omitempty"`
 }
 
-func configureHostInterfaces(interfaces []InterfaceConfig) error {
-	// No interfaces are declared, so config.json is the source of truth: remove
-	// any state file we previously wrote, otherwise nmstate.service would
-	// reapply that stale network config at the next boot.
-	if len(interfaces) == 0 {
-		if err := os.Remove(nmstateStatePath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("remove stale nmstate document %q failed: %w", nmstateStatePath, err)
-		}
-		return nil
+// removeNMStateDocument deletes the nmstate desired-state file this tool
+// previously wrote, so nmstate.service does not reapply a stale network config
+// at the next boot. A missing file is not an error.
+func removeNMStateDocument() error {
+	if err := os.Remove(nmstateStatePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove stale nmstate document %q failed: %w", nmstateStatePath, err)
+	}
+	return nil
+}
+
+func configureHostInterfaces(interfaces []InterfaceConfig, routes []RouteConfig) error {
+	// Neither interfaces nor routes are declared, so config.json is the source of
+	// truth: remove any state file we previously wrote, otherwise nmstate.service
+	// would reapply that stale network config at the next boot.
+	if len(interfaces) == 0 && len(routes) == 0 {
+		return removeNMStateDocument()
 	}
 
-	state, err := buildNMState(interfaces)
+	state, err := buildNMState(interfaces, routes)
 	if err != nil {
 		return err
 	}
@@ -202,7 +215,7 @@ func applyTxQueueLengths(interfaces []InterfaceConfig) error {
 // de-duplicated in first-seen order. When no DNS servers are declared, an empty
 // resolver config is emitted so nmstate clears any stale DNS left by a previous
 // config instead of preserving it.
-func buildNMState(interfaces []InterfaceConfig) (*nmState, error) {
+func buildNMState(interfaces []InterfaceConfig, routes []RouteConfig) (*nmState, error) {
 	state := &nmState{}
 	var dnsServers []string
 	seenDNS := make(map[string]struct{})
@@ -221,10 +234,7 @@ func buildNMState(interfaces []InterfaceConfig) (*nmState, error) {
 			return nil, err
 		}
 		if route != nil {
-			if state.Routes == nil {
-				state.Routes = &nmRoutes{}
-			}
-			state.Routes.Config = append(state.Routes.Config, *route)
+			appendRoute(state, *route)
 		}
 
 		dnsServers, err = appendInterfaceDNS(iface, label, seenDNS, dnsServers)
@@ -233,9 +243,30 @@ func buildNMState(interfaces []InterfaceConfig) (*nmState, error) {
 		}
 	}
 
+	// Explicitly declared routes follow the gateway-derived ones, in config
+	// order. nmstate applies them to the interfaces they name (which need not be
+	// declared here — they may be DHCP-managed or pre-existing).
+	for i, route := range routes {
+		label := routeLabel(route, i)
+		nmRoute, err := buildNMRoute(route, label)
+		if err != nil {
+			return nil, err
+		}
+		appendRoute(state, nmRoute)
+	}
+
 	state.DNSResolver = &nmDNS{Config: nmDNSConfig{Server: dnsServers}}
 
 	return state, nil
+}
+
+// appendRoute adds a route to the state's route config, allocating the routes
+// container on first use.
+func appendRoute(state *nmState, route nmRoute) {
+	if state.Routes == nil {
+		state.Routes = &nmRoutes{}
+	}
+	state.Routes.Config = append(state.Routes.Config, route)
 }
 
 // buildNMInterface translates one InterfaceConfig into an nmstate interface,
@@ -482,6 +513,81 @@ func gatewayRoute(iface InterfaceConfig, label string) (*nmRoute, error) {
 		NextHopAddress:   gateway.String(),
 		NextHopInterface: iface.Name,
 	}, nil
+}
+
+// maxRouteU32 is the largest value the kernel's 32-bit route table-id and metric
+// fields accept.
+const maxRouteU32 = 0xFFFFFFFF
+
+// routeLabel names a route for validation messages, preferring its declared
+// name, then its destination, then a positional index.
+func routeLabel(route RouteConfig, i int) string {
+	if name := strings.TrimSpace(route.Name); name != "" {
+		return name
+	}
+	return labelOrIndex(route.Destination, i)
+}
+
+// buildNMRoute validates a declared static route and translates it into an
+// nmstate route entry. It accepts a default route (destination "0.0.0.0/0" or
+// "::/0") or any network destination, an optional next-hop gateway (which must
+// match the destination's IP family), an optional routing table-id, and an
+// optional metric. The destination is normalized to its network address so
+// nmstate, which keys routes by destination, sees a canonical value.
+func buildNMRoute(route RouteConfig, label string) (nmRoute, error) {
+	destination := strings.TrimSpace(route.Destination)
+	if destination == "" {
+		return nmRoute{}, fmt.Errorf("route %s is missing destination", label)
+	}
+	prefix, err := netip.ParsePrefix(destination)
+	if err != nil {
+		return nmRoute{}, fmt.Errorf("route %s has invalid destination %q: want a CIDR network such as 0.0.0.0/0 or 10.0.0.0/8", label, route.Destination)
+	}
+
+	iface := strings.TrimSpace(route.NextHopInterface)
+	if iface == "" {
+		return nmRoute{}, fmt.Errorf("route %s is missing next_hop_interface", label)
+	}
+
+	nmRoute := nmRoute{
+		Destination:      prefix.Masked().String(),
+		NextHopInterface: iface,
+	}
+
+	if nextHop := strings.TrimSpace(route.NextHopAddress); nextHop != "" {
+		gateway, err := netip.ParseAddr(nextHop)
+		if err != nil {
+			return nmRoute, fmt.Errorf("route %s has invalid next_hop_address %q", label, route.NextHopAddress)
+		}
+		if gateway.Is4() != prefix.Addr().Is4() {
+			return nmRoute, fmt.Errorf("route %s next_hop_address %q and destination %q are different IP families", label, route.NextHopAddress, route.Destination)
+		}
+		nmRoute.NextHopAddress = gateway.String()
+	}
+
+	if err := validateRouteUint32(route.TableID, "table_id", label); err != nil {
+		return nmRoute, err
+	}
+	nmRoute.TableID = route.TableID
+
+	if err := validateRouteUint32(route.Metric, "metric", label); err != nil {
+		return nmRoute, err
+	}
+	nmRoute.Metric = route.Metric
+
+	return nmRoute, nil
+}
+
+// validateRouteUint32 checks an optional route attribute (table_id or metric)
+// fits the kernel's 32-bit unsigned range. A nil value (unset) is valid.
+func validateRouteUint32(value *int, field, label string) error {
+	if value == nil {
+		return nil
+	}
+	if *value < 0 || uint64(*value) > maxRouteU32 {
+		return fmt.Errorf("route %s %s %d must be between 0 and %d", label, field, *value, uint64(maxRouteU32))
+	}
+	return nil
 }
 
 // appendInterfaceDNS validates an interface's DNS servers and appends the ones

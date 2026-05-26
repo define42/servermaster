@@ -15,6 +15,7 @@ type Config struct {
 	Folders       []FolderConfig       `json:"folders"`
 	Files         []FileConfig         `json:"files"`
 	Interfaces    []InterfaceConfig    `json:"interfaces"`
+	Routes        []RouteConfig        `json:"routes,omitempty"`
 	FirewallPorts []FirewallPortConfig `json:"firewall_ports"`
 	Containers    []ContainerConfig    `json:"containers"`
 	Ostree        *OstreeConfig        `json:"ostree,omitempty"`
@@ -92,6 +93,36 @@ type InterfaceConfig struct {
 type VLANConfig struct {
 	BaseInterface string `json:"base_interface"`
 	ID            int    `json:"id"`
+}
+
+// RouteConfig is a static route installed through nmstate, and so persisted
+// across reboots and reapplied by nmstate.service just like the interface
+// config. It covers a default route (Destination "0.0.0.0/0" or "::/0") and,
+// via TableID, a route in a non-main routing table for policy routing. Routes
+// declared here are additive to the per-interface default routes derived from
+// each interface's gateway.
+type RouteConfig struct {
+	// Name is an optional human-readable label for the route. nmstate has no
+	// per-route name, so it is not applied to the kernel; it documents the route
+	// in the config and is used to identify it in validation error messages.
+	Name string `json:"name,omitempty"`
+	// Destination is the route's target network in CIDR form: "0.0.0.0/0" or
+	// "::/0" for a default route, or a specific network such as "10.0.0.0/8".
+	Destination string `json:"destination"`
+	// NextHopInterface is the egress interface for the route. nmstate requires a
+	// next-hop interface on every route, so it is mandatory here too.
+	NextHopInterface string `json:"next_hop_interface"`
+	// NextHopAddress is the gateway the route forwards through. Optional: omit it
+	// for an on-link route reached directly over NextHopInterface. When set it
+	// must share the destination's IP family.
+	NextHopAddress string `json:"next_hop_address,omitempty"`
+	// TableID selects the kernel routing table the route is installed in,
+	// mirroring nmstate's route table-id. Omitting it (or 0) uses the main table
+	// (254). A nil value leaves it at nmstate's default.
+	TableID *int `json:"table_id,omitempty"`
+	// Metric is the route priority/metric (lower wins among equal destinations).
+	// A nil value lets nmstate and the kernel pick the default.
+	Metric *int `json:"metric,omitempty"`
 }
 
 type FirewallPortConfig struct {
@@ -187,9 +218,10 @@ func validateConfig(cfg *Config) error {
 	if err := validateFiles(cfg.Files); err != nil {
 		return err
 	}
-	// buildNMState validates the interface config (names, paired ip/subnet,
-	// addresses within subnet, parseable gateway/DNS) without side effects.
-	if _, err := buildNMState(cfg.Interfaces); err != nil {
+	// buildNMState validates the interface and route config (names, paired
+	// ip/subnet, addresses within subnet, parseable gateway/DNS, route
+	// destinations/next hops/table ids) without side effects.
+	if _, err := buildNMState(cfg.Interfaces, cfg.Routes); err != nil {
 		return err
 	}
 	if err := validateFirewallPortConfigs(cfg.FirewallPorts); err != nil {

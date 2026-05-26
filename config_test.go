@@ -235,6 +235,7 @@ func TestValidateConfigValid(t *testing.T) {
 	t.Run("valid", func(t *testing.T) {
 		cfg := &Config{
 			PodmanMode:    "rootful",
+			Routes:        []RouteConfig{{Name: "corp-net", Destination: "10.0.0.0/8", NextHopInterface: "eth0", NextHopAddress: "192.168.1.1", TableID: intPtr(100)}},
 			FirewallPorts: []FirewallPortConfig{{Zone: "public", Port: "8080", Protocol: "tcp"}},
 			Containers: []ContainerConfig{
 				{Name: "web", Image: "nginx", Ports: []PortConfig{{HostPort: 8081, ContainerPort: 80}}},
@@ -290,5 +291,7 @@ func TestValidateConfigResourceErrors(t *testing.T) {
 		{name: "file bad encoding", cfg: &Config{Files: []FileConfig{{Path: "/data/x", Encoding: "rot13"}}}, want: "encoding"},
 		{name: "file bad base64", cfg: &Config{Files: []FileConfig{{Path: "/data/x", Encoding: "base64", Content: "not!base64"}}}, want: "base64"},
 		{name: "interface bad gateway", cfg: &Config{Interfaces: []InterfaceConfig{{Name: "eth0", Gateway: "not-an-ip"}}}, want: "gateway"},
+		{name: "route bad destination", cfg: &Config{Routes: []RouteConfig{{Destination: "nope", NextHopInterface: "eth0"}}}, want: "route"},
+		{name: "route missing next hop interface", cfg: &Config{Routes: []RouteConfig{{Destination: "0.0.0.0/0"}}}, want: "next_hop_interface"},
 	})
 }

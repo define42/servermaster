@@ -97,12 +97,12 @@ func TestConfigureHostInterfaces(t *testing.T) {
 	fakeCommand(t, "nmstatectl", "exit 0")
 
 	// No declared interfaces and no existing state file: nothing to remove.
-	if err := configureHostInterfaces(nil); err != nil {
+	if err := configureHostInterfaces(nil, nil); err != nil {
 		t.Fatalf("empty interfaces should be a no-op: %v", err)
 	}
 
 	ifaces := []InterfaceConfig{{Name: "eth0", IPAddress: "10.0.0.2", Subnet: "10.0.0.0/24"}}
-	if err := configureHostInterfaces(ifaces); err != nil {
+	if err := configureHostInterfaces(ifaces, nil); err != nil {
 		t.Fatalf("configureHostInterfaces: %v", err)
 	}
 	if _, err := os.Stat(nmstateStatePath); err != nil {
@@ -111,14 +111,14 @@ func TestConfigureHostInterfaces(t *testing.T) {
 
 	// Dropping all interfaces must remove the state file so nmstate.service
 	// does not reapply the stale config at the next boot.
-	if err := configureHostInterfaces(nil); err != nil {
+	if err := configureHostInterfaces(nil, nil); err != nil {
 		t.Fatalf("removing declared interfaces should succeed: %v", err)
 	}
 	if _, err := os.Stat(nmstateStatePath); !os.IsNotExist(err) {
 		t.Fatalf("stale desired-state file not removed: stat err = %v", err)
 	}
 
-	if err := configureHostInterfaces([]InterfaceConfig{{Name: ""}}); err == nil {
+	if err := configureHostInterfaces([]InterfaceConfig{{Name: ""}}, nil); err == nil {
 		t.Fatal("expected error for an interface with no name")
 	}
 }
@@ -135,7 +135,7 @@ func assertBuildNMStateErrors(t *testing.T, cases []nmStateErrorCase) {
 	t.Helper()
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := buildNMState([]InterfaceConfig{tt.iface}); err == nil {
+			if _, err := buildNMState([]InterfaceConfig{tt.iface}, nil); err == nil {
 				t.Fatalf("buildNMState(%+v) expected error, got nil", tt.iface)
 			}
 		})
@@ -149,7 +149,7 @@ func TestBuildNMStateStaticIPv4(t *testing.T) {
 		Subnet:    "192.168.1.0/24",
 		Gateway:   "192.168.1.1",
 		DNS:       []string{"1.1.1.1", "8.8.8.8"},
-	}})
+	}}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestConfigureHostInterfacesApplyFails(t *testing.T) {
 	defer func() { nmstateStatePath = prev }()
 	fakeCommand(t, "nmstatectl", "echo nope >&2; exit 1")
 
-	err := configureHostInterfaces([]InterfaceConfig{{Name: "eth0"}})
+	err := configureHostInterfaces([]InterfaceConfig{{Name: "eth0"}}, nil)
 	if err == nil || !strings.Contains(err.Error(), "apply host interface configuration failed") {
 		t.Fatalf("err = %v, want apply failure", err)
 	}
@@ -224,7 +224,7 @@ func TestBuildNMStateInterfaceType(t *testing.T) {
 			Type:      "dummy",
 			IPAddress: "192.168.1.10",
 			Subnet:    "192.168.1.0/24",
-		}})
+		}}, nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -234,7 +234,7 @@ func TestBuildNMStateInterfaceType(t *testing.T) {
 	})
 
 	t.Run("empty type defaults to ethernet", func(t *testing.T) {
-		state, err := buildNMState([]InterfaceConfig{{Name: "eth0"}})
+		state, err := buildNMState([]InterfaceConfig{{Name: "eth0"}}, nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -251,7 +251,7 @@ func TestBuildNMStateVLAN(t *testing.T) {
 		IPAddress: "192.168.100.10",
 		Subnet:    "192.168.100.0/24",
 		VLAN:      &VLANConfig{BaseInterface: "eth0", ID: 100},
-	}})
+	}}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestBuildNMStateMTU(t *testing.T) {
 		Name:       "eth0",
 		MTU:        intPtr(9000),
 		IPv4Method: "dhcp",
-	}})
+	}}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -299,7 +299,7 @@ func TestBuildNMStateIPv6Gateway(t *testing.T) {
 		IPAddress: "2001:db8::10",
 		Subnet:    "2001:db8::/64",
 		Gateway:   "2001:db8::1",
-	}})
+	}}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -314,7 +314,7 @@ func TestBuildNMStateIPv6Gateway(t *testing.T) {
 func TestBuildNMStateIPv4DHCP(t *testing.T) {
 	for _, method := range []string{"dhcp", "auto"} {
 		t.Run(method, func(t *testing.T) {
-			state, err := buildNMState([]InterfaceConfig{{Name: "eth0", IPv4Method: method}})
+			state, err := buildNMState([]InterfaceConfig{{Name: "eth0", IPv4Method: method}}, nil)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -333,7 +333,7 @@ func TestBuildNMStateIPv4DHCP(t *testing.T) {
 }
 
 func TestBuildNMStateIPv4Disabled(t *testing.T) {
-	state, err := buildNMState([]InterfaceConfig{{Name: "eth0", IPv4Method: "disabled"}})
+	state, err := buildNMState([]InterfaceConfig{{Name: "eth0", IPv4Method: "disabled"}}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -351,7 +351,7 @@ func TestBuildNMStateClearsDNSWhenNoneDeclared(t *testing.T) {
 		IPv4Method:      "disabled",
 		IPv6Method:      "link-local",
 		IPv6AddrGenMode: "eui64",
-	}})
+	}}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -387,7 +387,7 @@ func TestBuildNMStateIPv4DHCPWithIPv6Static(t *testing.T) {
 		IPv4Method: "dhcp",
 		IPAddress:  "2001:db8::10",
 		Subnet:     "2001:db8::/64",
-	}})
+	}}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -413,7 +413,7 @@ func TestBuildNMStateIPv6LinkLocal(t *testing.T) {
 		Name:            "ens1f1np1",
 		IPv6Method:      "link-local",
 		IPv6AddrGenMode: "eui64",
-	}})
+	}}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -452,7 +452,7 @@ func TestBuildNMStateIPv6Methods(t *testing.T) {
 	}
 	for _, tt := range cases {
 		t.Run(tt.method, func(t *testing.T) {
-			state, err := buildNMState([]InterfaceConfig{{Name: "eth0", IPv6Method: tt.method}})
+			state, err := buildNMState([]InterfaceConfig{{Name: "eth0", IPv6Method: tt.method}}, nil)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -477,7 +477,7 @@ func TestBuildNMStateIPv6AddrGenModeOnStatic(t *testing.T) {
 		IPAddress:       "2001:db8::10",
 		Subnet:          "2001:db8::/64",
 		IPv6AddrGenMode: "stable-privacy",
-	}})
+	}}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -497,7 +497,7 @@ func TestBuildNMStateIPv4StaticWithIPv6LinkLocal(t *testing.T) {
 		IPAddress:  "192.168.1.10",
 		Subnet:     "192.168.1.0/24",
 		IPv6Method: "link-local",
-	}})
+	}}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -524,7 +524,7 @@ func TestBuildNMStateDNSMerge(t *testing.T) {
 	state, err := buildNMState([]InterfaceConfig{
 		{Name: "eth0", DNS: []string{"1.1.1.1", "8.8.8.8"}},
 		{Name: "eth1", DNS: []string{"8.8.8.8", "9.9.9.9"}},
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -545,6 +545,207 @@ func TestBuildNMStateErrors(t *testing.T) {
 		{"negative mtu", InterfaceConfig{Name: "eth0", MTU: intPtr(-1)}},
 		{"negative txqueuelen", InterfaceConfig{Name: "eth0", TxQueueLen: intPtr(-1)}},
 	})
+}
+
+func TestBuildNMStateRoutes(t *testing.T) {
+	state, err := buildNMState(nil, []RouteConfig{
+		{
+			Destination:      "0.0.0.0/0",
+			NextHopInterface: "eth0",
+			NextHopAddress:   "192.168.1.1",
+			TableID:          intPtr(100),
+			Metric:           intPtr(50),
+		},
+		{
+			// On-link route: no gateway, and a host bit set in the destination
+			// that must be normalized away to the network address.
+			Destination:      "10.20.0.5/16",
+			NextHopInterface: "eth1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if state.Routes == nil || len(state.Routes.Config) != 2 {
+		t.Fatalf("routes = %+v, want two", state.Routes)
+	}
+
+	def := state.Routes.Config[0]
+	if def.Destination != "0.0.0.0/0" || def.NextHopInterface != "eth0" || def.NextHopAddress != "192.168.1.1" {
+		t.Fatalf("default route mismatch: %+v", def)
+	}
+	if def.TableID == nil || *def.TableID != 100 || def.Metric == nil || *def.Metric != 50 {
+		t.Fatalf("default route table/metric mismatch: %+v", def)
+	}
+
+	onlink := state.Routes.Config[1]
+	if onlink.Destination != "10.20.0.0/16" {
+		t.Fatalf("on-link destination not normalized to network: %q", onlink.Destination)
+	}
+	if onlink.NextHopAddress != "" || onlink.TableID != nil || onlink.Metric != nil {
+		t.Fatalf("on-link route should leave next hop/table/metric unset: %+v", onlink)
+	}
+}
+
+func TestBuildNMStateIPv6Route(t *testing.T) {
+	state, err := buildNMState(nil, []RouteConfig{{
+		Destination:      "::/0",
+		NextHopInterface: "eth0",
+		NextHopAddress:   "2001:db8::1",
+		TableID:          intPtr(254),
+	}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	route := state.Routes.Config[0]
+	if route.Destination != "::/0" || route.NextHopAddress != "2001:db8::1" {
+		t.Fatalf("ipv6 route mismatch: %+v", route)
+	}
+}
+
+func TestBuildNMStateRoutesAppendAfterGateway(t *testing.T) {
+	// Explicitly declared routes are additive to the per-interface gateway
+	// route, and follow it in the emitted document.
+	state, err := buildNMState(
+		[]InterfaceConfig{{Name: "eth0", IPAddress: "192.168.1.10", Subnet: "192.168.1.0/24", Gateway: "192.168.1.1"}},
+		[]RouteConfig{{Destination: "10.0.0.0/8", NextHopInterface: "eth0", NextHopAddress: "192.168.1.254"}},
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if state.Routes == nil || len(state.Routes.Config) != 2 {
+		t.Fatalf("routes = %+v, want gateway route plus explicit route", state.Routes)
+	}
+	if state.Routes.Config[0].Destination != "0.0.0.0/0" {
+		t.Fatalf("gateway route should come first: %+v", state.Routes.Config)
+	}
+	if state.Routes.Config[1].Destination != "10.0.0.0/8" {
+		t.Fatalf("explicit route should follow gateway route: %+v", state.Routes.Config)
+	}
+}
+
+func TestBuildNMStateRouteJSONOmitsUnsetFields(t *testing.T) {
+	state, err := buildNMState(nil, []RouteConfig{{Destination: "10.0.0.0/8", NextHopInterface: "eth0"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, key := range []string{"next-hop-address", "table-id", "metric"} {
+		if strings.Contains(string(raw), key) {
+			t.Fatalf("unset route field %q should be omitted; json=%s", key, raw)
+		}
+	}
+
+	state, err = buildNMState(nil, []RouteConfig{{
+		Destination:      "10.0.0.0/8",
+		NextHopInterface: "eth0",
+		NextHopAddress:   "10.0.0.1",
+		TableID:          intPtr(200),
+		Metric:           intPtr(10),
+	}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	raw, err = json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, want := range []string{`"next-hop-address":"10.0.0.1"`, `"table-id":200`, `"metric":10`} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("set route field %q should be present; json=%s", want, raw)
+		}
+	}
+}
+
+func TestBuildNMStateRouteErrors(t *testing.T) {
+	cases := []struct {
+		name  string
+		route RouteConfig
+	}{
+		{"missing destination", RouteConfig{NextHopInterface: "eth0"}},
+		{"bad destination", RouteConfig{Destination: "not-a-cidr", NextHopInterface: "eth0"}},
+		{"bare ip destination", RouteConfig{Destination: "10.0.0.1", NextHopInterface: "eth0"}},
+		{"missing next hop interface", RouteConfig{Destination: "0.0.0.0/0", NextHopAddress: "192.168.1.1"}},
+		{"bad next hop address", RouteConfig{Destination: "0.0.0.0/0", NextHopInterface: "eth0", NextHopAddress: "nope"}},
+		{"family mismatch", RouteConfig{Destination: "0.0.0.0/0", NextHopInterface: "eth0", NextHopAddress: "2001:db8::1"}},
+		{"negative table id", RouteConfig{Destination: "0.0.0.0/0", NextHopInterface: "eth0", TableID: intPtr(-1)}},
+		{"table id too large", RouteConfig{Destination: "0.0.0.0/0", NextHopInterface: "eth0", TableID: intPtr(maxRouteU32 + 1)}},
+		{"negative metric", RouteConfig{Destination: "0.0.0.0/0", NextHopInterface: "eth0", Metric: intPtr(-1)}},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := buildNMState(nil, []RouteConfig{tt.route}); err == nil {
+				t.Fatalf("buildNMState(route %+v) expected error, got nil", tt.route)
+			}
+		})
+	}
+}
+
+func TestBuildNMStateRouteNameInError(t *testing.T) {
+	_, err := buildNMState(nil, []RouteConfig{{
+		Name:             "uplink",
+		Destination:      "0.0.0.0/0",
+		NextHopInterface: "eth0",
+		NextHopAddress:   "not-an-ip",
+	}})
+	if err == nil {
+		t.Fatal("expected error for bad next_hop_address")
+	}
+	if !strings.Contains(err.Error(), "uplink") {
+		t.Fatalf("error %q should identify the route by its name %q", err, "uplink")
+	}
+}
+
+func TestBuildNMStateRouteNameNotApplied(t *testing.T) {
+	// name is documentation only: the route still builds, but the name does not
+	// reach the nmstate document applied to the host.
+	state, err := buildNMState(nil, []RouteConfig{{
+		Name:             "corp-net",
+		Destination:      "10.0.0.0/8",
+		NextHopInterface: "eth0",
+		NextHopAddress:   "192.168.1.1",
+	}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if state.Routes == nil || len(state.Routes.Config) != 1 {
+		t.Fatalf("route not built: %+v", state.Routes)
+	}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(raw), "corp-net") {
+		t.Fatalf("route name leaked into nmstate document: %s", raw)
+	}
+}
+
+func TestConfigureHostInterfacesRoutesOnly(t *testing.T) {
+	prev := nmstateStatePath
+	nmstateStatePath = filepath.Join(t.TempDir(), "nmstate", "state.yml")
+	defer func() { nmstateStatePath = prev }()
+	fakeCommand(t, "nmstatectl", "exit 0")
+
+	// Routes but no interfaces must still write a state file so the routes are
+	// applied (and reapplied at boot by nmstate.service).
+	routes := []RouteConfig{{Destination: "10.0.0.0/8", NextHopInterface: "eth0", NextHopAddress: "192.168.1.1"}}
+	if err := configureHostInterfaces(nil, routes); err != nil {
+		t.Fatalf("configureHostInterfaces with routes only: %v", err)
+	}
+	if _, err := os.Stat(nmstateStatePath); err != nil {
+		t.Fatalf("desired-state file not written for routes-only config: %v", err)
+	}
+
+	// Dropping both interfaces and routes removes the state file.
+	if err := configureHostInterfaces(nil, nil); err != nil {
+		t.Fatalf("clearing interfaces and routes should succeed: %v", err)
+	}
+	if _, err := os.Stat(nmstateStatePath); !os.IsNotExist(err) {
+		t.Fatalf("stale desired-state file not removed: stat err = %v", err)
+	}
 }
 
 func intPtr(n int) *int { return &n }

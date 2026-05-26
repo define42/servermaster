@@ -192,7 +192,10 @@ func firewallSourceFamily(source string) (family, normalized string, err error) 
 	if prefix.Addr().Is6() {
 		family = "ipv6"
 	}
-	return family, prefix.String(), nil
+	// Mask off host bits: netip keeps them (10.0.0.5/24 stays 10.0.0.5/24),
+	// but firewalld rejects a rich-rule source CIDR that is not a network
+	// address, so a config that passes validation would fail at apply time.
+	return family, prefix.Masked().String(), nil
 }
 
 // firewallPortKey normalizes a port and protocol into a comparison key, applying

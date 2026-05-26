@@ -189,6 +189,69 @@ func TestFirewallPortKey(t *testing.T) {
 	}
 }
 
+func TestFirewallRichRule(t *testing.T) {
+	tests := []struct {
+		name     string
+		source   string
+		port     string
+		protocol string
+		want     string
+		wantErr  bool
+	}{
+		{
+			name:   "ipv4 host",
+			source: "10.0.0.10", port: "8080", protocol: "tcp",
+			want: `rule family="ipv4" source address="10.0.0.10" port port="8080" protocol="tcp" accept`,
+		},
+		{
+			name:   "ipv4 cidr",
+			source: "10.0.0.0/24", port: "8080", protocol: "tcp",
+			want: `rule family="ipv4" source address="10.0.0.0/24" port port="8080" protocol="tcp" accept`,
+		},
+		{
+			// firewalld rejects a source CIDR with host bits set, so it must be
+			// masked to the network address before the rule is built.
+			name:   "ipv4 cidr with host bits masked",
+			source: "10.0.0.5/24", port: "8080", protocol: "tcp",
+			want: `rule family="ipv4" source address="10.0.0.0/24" port port="8080" protocol="tcp" accept`,
+		},
+		{
+			name:   "empty protocol defaults tcp",
+			source: "10.0.0.10", port: "443", protocol: "",
+			want: `rule family="ipv4" source address="10.0.0.10" port port="443" protocol="tcp" accept`,
+		},
+		{
+			name:   "ipv6 cidr",
+			source: "2001:db8::/64", port: "53", protocol: "udp",
+			want: `rule family="ipv6" source address="2001:db8::/64" port port="53" protocol="udp" accept`,
+		},
+		{
+			name:   "empty source",
+			source: "", port: "8080", protocol: "tcp",
+			wantErr: true,
+		},
+		{
+			name:   "invalid source",
+			source: "not-an-ip", port: "8080", protocol: "tcp",
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := firewallRichRule(tt.source, tt.port, tt.protocol)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("firewallRichRule(%q, %q, %q) error = %v, wantErr %v", tt.source, tt.port, tt.protocol, err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			if got != tt.want {
+				t.Fatalf("firewallRichRule(%q, %q, %q) = %q, want %q", tt.source, tt.port, tt.protocol, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestDeclaredFirewallPorts(t *testing.T) {
 	ports := []FirewallPortConfig{
 		{Port: "8080", Protocol: "tcp"}, // empty zone -> default

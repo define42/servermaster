@@ -35,3 +35,8 @@ jobs:
           # is sufficient for this codebase.
           version: v2.12.2
           args: --timeout=5m
+          # Invalidate daily to avoid stale cache entries from before the
+          # repo was renamed (older cache hits surfaced phantom gosec
+          # findings whose `//nolint:gosec` suppressions couldn't be
+          # applied because the cached absolute paths no longer existed).
+          cache-invalidation-interval: "1"

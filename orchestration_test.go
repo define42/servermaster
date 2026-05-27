@@ -137,13 +137,13 @@ func TestMainParsesFlagsAndRunsService(t *testing.T) {
 		gotConfig = configPath
 		return nil
 	}
-	flag.CommandLine = flag.NewFlagSet("servermaster", flag.ContinueOnError)
+	flag.CommandLine = flag.NewFlagSet("edgecommander", flag.ContinueOnError)
 	flag.CommandLine.SetOutput(io.Discard)
-	os.Args = []string{"servermaster", "-listen", "unix:///tmp/servermaster.sock", "-config", "/tmp/servermaster.json"}
+	os.Args = []string{"edgecommander", "-listen", "unix:///tmp/edgecommander.sock", "-config", "/tmp/edgecommander.json"}
 
 	main()
 
-	if gotListen != "unix:///tmp/servermaster.sock" || gotConfig != "/tmp/servermaster.json" {
+	if gotListen != "unix:///tmp/edgecommander.sock" || gotConfig != "/tmp/edgecommander.json" {
 		t.Fatalf("runServiceFunc called with (%q, %q)", gotListen, gotConfig)
 	}
 }

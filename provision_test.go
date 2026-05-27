@@ -104,7 +104,7 @@ func TestEnsureHostname(t *testing.T) {
 
 	// A different hostname runs hostnamectl, stubbed so the real host is untouched.
 	fakeCommand(t, "hostnamectl", "exit 0")
-	if err := ensureHostname("servermaster-coverage-host"); err != nil {
+	if err := ensureHostname("edgecommander-coverage-host"); err != nil {
 		t.Fatalf("ensureHostname: %v", err)
 	}
 }
@@ -139,7 +139,7 @@ func TestDecodeFileContent(t *testing.T) {
 
 func TestEnsureHostnameApplyError(t *testing.T) {
 	fakeCommand(t, "hostnamectl", "echo nope >&2; exit 1")
-	if err := ensureHostname("servermaster-coverage-host"); err == nil {
+	if err := ensureHostname("edgecommander-coverage-host"); err == nil {
 		t.Fatal("expected error when hostnamectl fails")
 	}
 }

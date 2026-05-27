@@ -29,10 +29,10 @@ func TestStartWebServer(t *testing.T) {
 		t.Fatalf("startWebServer: %v", err)
 	}
 
-	// Only the /servermaster/* namespace is registered.
+	// Only the /edgecommander/* namespace is registered.
 	assertGet(t, "http://"+addr+"/", http.StatusNotFound, "")
 	assertGet(t, "http://"+addr+"/nope", http.StatusNotFound, "")
-	assertGet(t, "http://"+addr+apiHealthPath, http.StatusOK, "servermaster running")
+	assertGet(t, "http://"+addr+apiHealthPath, http.StatusOK, "edgecommander running")
 
 	// Each endpoint's wrong-method path is a cheap way to exercise its
 	// registration without invoking the heavy collectors.
@@ -65,7 +65,7 @@ func TestParseListenAddress(t *testing.T) {
 		{":8080", "tcp", ":8080"},
 		{"127.0.0.1:8080", "tcp", "127.0.0.1:8080"},
 		{"0.0.0.0:9000", "tcp", "0.0.0.0:9000"},
-		{"unix:///run/servermaster/servermaster.sock", "unix", "/run/servermaster/servermaster.sock"},
+		{"unix:///run/edgecommander/edgecommander.sock", "unix", "/run/edgecommander/edgecommander.sock"},
 		{"unix:/run/x.sock", "unix", "/run/x.sock"},
 		{"unix://run/x.sock", "unix", "run/x.sock"},
 	}
@@ -78,7 +78,7 @@ func TestParseListenAddress(t *testing.T) {
 }
 
 func TestStartWebServerUnixSocket(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "servermaster.sock")
+	socketPath := filepath.Join(t.TempDir(), "edgecommander.sock")
 	cfgPath := writeTempConfig(t, `{}`)
 
 	// "unix://" + an absolute path is the documented URL form.
@@ -288,10 +288,10 @@ func TestListenUnixEarlyErrors(t *testing.T) {
 	}
 }
 
-func stubServermasterStatusCollector(fn func(context.Context, string) servermasterStatus) func() {
-	prev := servermasterStatusCollector
-	servermasterStatusCollector = fn
-	return func() { servermasterStatusCollector = prev }
+func stubEdgecommanderStatusCollector(fn func(context.Context, string) edgecommanderStatus) func() {
+	prev := edgecommanderStatusCollector
+	edgecommanderStatusCollector = fn
+	return func() { edgecommanderStatusCollector = prev }
 }
 
 func stubRebootScheduler(fn func()) func() {
@@ -300,10 +300,10 @@ func stubRebootScheduler(fn func()) func() {
 	return func() { rebootScheduler = prev }
 }
 
-// sampleServermasterStatus is a fully populated status document used to exercise
-// the /servermaster/status handler's encoding.
-func sampleServermasterStatus() servermasterStatus {
-	return servermasterStatus{
+// sampleEdgecommanderStatus is a fully populated status document used to exercise
+// the /edgecommander/status handler's encoding.
+func sampleEdgecommanderStatus() edgecommanderStatus {
+	return edgecommanderStatus{
 		Status:      "ok",
 		GeneratedAt: "2026-05-24T12:00:00Z",
 		Ostree:      ostreeStatus{Source: "test", Version: "1.2.3", Booted: true},
@@ -337,14 +337,14 @@ func sampleServermasterStatus() servermasterStatus {
 	}
 }
 
-func TestHandleServermasterStatusPrettyJSON(t *testing.T) {
-	defer stubServermasterStatusCollector(func(context.Context, string) servermasterStatus {
-		return sampleServermasterStatus()
+func TestHandleEdgecommanderStatusPrettyJSON(t *testing.T) {
+	defer stubEdgecommanderStatusCollector(func(context.Context, string) edgecommanderStatus {
+		return sampleEdgecommanderStatus()
 	})()
 
 	req := httptest.NewRequest(http.MethodGet, apiStatusPath, nil)
 	rec := httptest.NewRecorder()
-	handleServermasterStatus(rec, req, "unused")
+	handleEdgecommanderStatus(rec, req, "unused")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -355,7 +355,7 @@ func TestHandleServermasterStatusPrettyJSON(t *testing.T) {
 		t.Fatalf("response is not pretty-printed JSON: %q", rec.Body.String())
 	}
 
-	var got servermasterStatus
+	var got edgecommanderStatus
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("unmarshal status: %v", err)
 	}
@@ -370,7 +370,7 @@ func TestHandleServermasterStatusPrettyJSON(t *testing.T) {
 	}
 }
 
-// validConfigUploadBody is a minimal valid /servermaster/config request body
+// validConfigUploadBody is a minimal valid /edgecommander/config request body
 // shared by the upload tests.
 const validConfigUploadBody = `{"containers":[{"name":"web","image":"nginx","ports":[{"host_port":8081,"container_port":80}]}]}`
 
@@ -410,7 +410,7 @@ func TestHandleConfigUploadInvalidConfig(t *testing.T) {
 }
 
 func TestHandleConfigUploadRejectionLogged(t *testing.T) {
-	ring := newLogRing(servermasterLogTail)
+	ring := newLogRing(edgecommanderLogTail)
 	orig := log.Writer()
 	log.SetOutput(ring)
 	defer log.SetOutput(orig)

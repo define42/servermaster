@@ -12,7 +12,7 @@ import (
 )
 
 // applyMu serializes host convergence so the startup reconcile and concurrent
-// /servermaster/config uploads cannot interleave changes to folders, interfaces,
+// /edgecommander/config uploads cannot interleave changes to folders, interfaces,
 // firewall, or containers. Callers hold it across the whole apply.
 //
 //nolint:gochecknoglobals // process-wide lock guarding the single host apply.
@@ -62,7 +62,7 @@ func runService(listenAddress, configPath string) error {
 	// is configured with Restart=always/RestartSec=10s, so returning here
 	// would tear down and recreate every container on a tight crash loop.
 	// The web server stays up so the host remains observable. applyMu is held
-	// so an early /servermaster/config upload cannot race the startup convergence.
+	// so an early /edgecommander/config upload cannot race the startup convergence.
 	applyMu.Lock()
 	runErr := run(configPath)
 	applyMu.Unlock()
@@ -89,7 +89,7 @@ func run(configPath string) error {
 // applyConfig validates the desired node configuration and converges the host
 // to it: host folders, host interfaces, firewall ports, the Podman socket, and
 // the declared containers. Callers must hold applyMu so two convergence runs
-// (the startup reconcile and a concurrent /servermaster/config upload) cannot
+// (the startup reconcile and a concurrent /edgecommander/config upload) cannot
 // interleave host changes.
 func applyConfig(cfg *Config) error {
 	if err := validateConfigFunc(cfg); err != nil {

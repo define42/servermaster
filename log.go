@@ -8,15 +8,15 @@ import (
 )
 
 const (
-	servermasterLogTail = 100
+	edgecommanderLogTail = 100
 )
 
 // serviceLog retains the most recent log lines in memory so the
-// /servermaster/status endpoint can surface them in servermaster_log.
+// /edgecommander/status endpoint can surface them in edgecommander_log.
 // captureServiceLog tees the standard logger into it at startup.
 //
 //nolint:gochecknoglobals // process-wide log ring teed from the standard logger.
-var serviceLog = newLogRing(servermasterLogTail)
+var serviceLog = newLogRing(edgecommanderLogTail)
 
 // logRing is a bounded, concurrency-safe buffer of the most recent log lines. It
 // is an io.Writer, so installing it as (part of) the standard logger's output
@@ -58,7 +58,7 @@ func (r *logRing) snapshot() []string {
 
 // captureServiceLog tees the standard logger to its existing destination and the
 // in-memory ring, so logs still reach stderr/journald while becoming queryable
-// via /servermaster/status.
+// via /edgecommander/status.
 func captureServiceLog() {
 	log.SetOutput(io.MultiWriter(log.Writer(), serviceLog))
 }

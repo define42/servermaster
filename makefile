@@ -1,8 +1,8 @@
 .PHONY: test lint govulncheck build rpm clean
 
-BINARY := servermaster
+BINARY := edgecommander
 DIST   := dist
-UNIT   := servermaster.service
+UNIT   := edgecommander.service
 
 # RPM version: the latest git tag with the leading "v" stripped, or 0.0.0 when
 # the tree has no tags. Override with: make rpm VERSION=1.2.3

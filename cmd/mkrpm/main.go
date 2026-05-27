@@ -1,4 +1,4 @@
-// Command mkrpm packages the prebuilt servermaster binary together with its
+// Command mkrpm packages the prebuilt edgecommander binary together with its
 // systemd unit and license into an RPM using the pure-Go
 // github.com/google/rpmpack. No rpmbuild, spec file, or Go toolchain is needed
 // in a buildroot, so the package can be produced on any build host. It is
@@ -16,13 +16,13 @@ import (
 )
 
 const (
-	packageName     = "servermaster"
+	packageName     = "edgecommander"
 	summary         = "Podman container reconciler and node configuration service"
-	description     = "servermaster reads a JSON node configuration and reconciles host folders, host network interfaces (through nmstate), firewalld ports, and the Podman containers that should be present. It also serves /servermaster/status, /servermaster/restart, and /servermaster/ostree OS-update endpoints over its -listen address, which defaults to a local Unix socket."
-	url             = "https://github.com/define42/servermaster"
+	description     = "edgecommander reads a JSON node configuration and reconciles host folders, host network interfaces (through nmstate), firewalld ports, and the Podman containers that should be present. It also serves /edgecommander/status, /edgecommander/restart, and /edgecommander/ostree OS-update endpoints over its -listen address, which defaults to a local Unix socket."
+	url             = "https://github.com/define42/edgecommander"
 	licence         = "Apache-2.0"
-	unitDestination = "/usr/lib/systemd/system/servermaster.service"
-	licenseDest     = "/usr/share/licenses/servermaster/LICENSE"
+	unitDestination = "/usr/lib/systemd/system/edgecommander.service"
+	licenseDest     = "/usr/share/licenses/edgecommander/LICENSE"
 )
 
 // The service runs as root, so no dedicated user is created. These scriptlets
@@ -37,20 +37,20 @@ const (
 const postinScript = `if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload || :
     if [ "$1" = 1 ]; then
-        systemctl --no-reload preset servermaster.service || :
+        systemctl --no-reload preset edgecommander.service || :
     fi
 fi
 `
 
 const preunScript = `if [ "$1" = 0 ] && command -v systemctl >/dev/null 2>&1; then
-    systemctl --no-reload disable --now servermaster.service || :
+    systemctl --no-reload disable --now edgecommander.service || :
 fi
 `
 
 const postunScript = `if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload || :
     if [ "$1" -ge 1 ]; then
-        systemctl try-restart servermaster.service || :
+        systemctl try-restart edgecommander.service || :
     fi
 fi
 `
@@ -71,9 +71,9 @@ func main() {
 	flag.StringVar(&o.version, "version", "0.0.0", "package version")
 	flag.StringVar(&o.release, "release", "1", "package release")
 	flag.StringVar(&o.arch, "arch", rpmArch(runtime.GOARCH), "package architecture")
-	flag.StringVar(&o.binarySrc, "binary", "dist/servermaster", "path to the prebuilt binary")
-	flag.StringVar(&o.binaryDest, "binary-dest", "/usr/bin/servermaster", "install path for the binary")
-	flag.StringVar(&o.unitSrc, "unit", "servermaster.service", "path to the systemd unit file")
+	flag.StringVar(&o.binarySrc, "binary", "dist/edgecommander", "path to the prebuilt binary")
+	flag.StringVar(&o.binaryDest, "binary-dest", "/usr/bin/edgecommander", "install path for the binary")
+	flag.StringVar(&o.unitSrc, "unit", "edgecommander.service", "path to the systemd unit file")
 	flag.StringVar(&o.licenseSrc, "license", "LICENSE", "path to the license file")
 	flag.StringVar(&o.out, "out", "", "output rpm path (default dist/<name>-<version>-<release>.<arch>.rpm)")
 	flag.Parse()

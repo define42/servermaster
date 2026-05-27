@@ -1,4 +1,4 @@
-module servermaster
+module edgecommander
 
 go 1.26.3
 

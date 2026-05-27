@@ -14,19 +14,19 @@ import (
 var edgecommanderStatusCollector = collectEdgecommanderStatus
 
 type edgecommanderStatus struct {
-	Status          string                   `json:"status"`
-	GeneratedAt     string                   `json:"generated_at"`
-	Hostname        string                   `json:"hostname,omitempty"`
-	Uptime          uptimeStatus             `json:"uptime"`
-	Ostree          ostreeStatus             `json:"ostree"`
-	FreeDiskSpace   []diskStatus             `json:"free_diskspace"`
-	Memory          memoryStatus             `json:"memory"`
-	CPU             cpuStatus                `json:"cpu"`
-	Inventory       *Inventory               `json:"inventory,omitempty"`
-	Network         networkStatus            `json:"network"`
-	Containers      []runningContainerStatus `json:"containers"`
+	Status           string                   `json:"status"`
+	GeneratedAt      string                   `json:"generated_at"`
+	Hostname         string                   `json:"hostname,omitempty"`
+	Uptime           uptimeStatus             `json:"uptime"`
+	Ostree           ostreeStatus             `json:"ostree"`
+	FreeDiskSpace    []diskStatus             `json:"free_diskspace"`
+	Memory           memoryStatus             `json:"memory"`
+	CPU              cpuStatus                `json:"cpu"`
+	Inventory        *Inventory               `json:"inventory,omitempty"`
+	Network          networkStatus            `json:"network"`
+	Containers       []runningContainerStatus `json:"containers"`
 	EdgecommanderLog []string                 `json:"edgecommander_log"`
-	Errors          []string                 `json:"errors,omitempty"`
+	Errors           []string                 `json:"errors,omitempty"`
 }
 
 // recordError appends "prefix: msg" to the status errors when msg is non-empty,

@@ -328,3 +328,51 @@ func TestValidateConfigResourceErrors(t *testing.T) {
 		{name: "route missing next hop interface", cfg: &Config{Routes: []RouteConfig{{Destination: "0.0.0.0/0"}}}, want: "next_hop_interface"},
 	})
 }
+
+func TestValidateNetworkMode(t *testing.T) {
+	for _, mode := range []string{"", "host", "bridge", "none", "private", "slirp4netns", "pasta"} {
+		if err := validateNetworkMode(mode); err != nil {
+			t.Errorf("validateNetworkMode(%q) unexpected error: %v", mode, err)
+		}
+	}
+	for _, mode := range []string{"container:abc", "ns:/proc/1/ns/net", "bogus"} {
+		if err := validateNetworkMode(mode); err == nil {
+			t.Errorf("validateNetworkMode(%q) expected error, got nil", mode)
+		}
+	}
+}
+
+func TestValidateCapability(t *testing.T) {
+	for _, cap := range []string{"ALL", "CAP_NET_ADMIN", "CAP_SYS_PTRACE", "CAP_AUDIT_WRITE"} {
+		if err := validateCapability(cap); err != nil {
+			t.Errorf("validateCapability(%q) unexpected error: %v", cap, err)
+		}
+	}
+	for _, cap := range []string{"", "net_admin", "CAP_", "CAP_net_admin", "CAP_NET-ADMIN"} {
+		if err := validateCapability(cap); err == nil {
+			t.Errorf("validateCapability(%q) expected error, got nil", cap)
+		}
+	}
+}
+
+func TestValidateContainerCapabilities(t *testing.T) {
+	if err := validateContainer(ContainerConfig{
+		Name:        "x",
+		Image:       "busybox",
+		NetworkMode: "host",
+		ReadOnly:    true,
+		CapAdd:      []string{"CAP_NET_ADMIN"},
+		CapDrop:     []string{"ALL"},
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := validateContainer(ContainerConfig{Name: "x", Image: "busybox", NetworkMode: "wat"}); err == nil {
+		t.Fatal("expected error for invalid network_mode")
+	}
+	if err := validateContainer(ContainerConfig{Name: "x", Image: "busybox", CapAdd: []string{"net_admin"}}); err == nil {
+		t.Fatal("expected error for invalid cap_add")
+	}
+	if err := validateContainer(ContainerConfig{Name: "x", Image: "busybox", CapDrop: []string{""}}); err == nil {
+		t.Fatal("expected error for empty cap_drop")
+	}
+}

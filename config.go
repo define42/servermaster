@@ -50,6 +50,21 @@ type ContainerConfig struct {
 	Interfaces []InterfaceConfig `json:"interfaces"`
 	Command    []string          `json:"command"`
 	Restart    string            `json:"restart"`
+	// NetworkMode selects the container's network namespace mode, mirroring
+	// Podman's specgen netns. Supported values are "" (Podman default),
+	// "host", "bridge", "none", "private", "slirp4netns", and "pasta". The
+	// most common non-default value is "host", which shares the host's
+	// network namespace with the container.
+	NetworkMode string `json:"network_mode,omitempty"`
+	// ReadOnly mounts the container's root filesystem read-only when true,
+	// mirroring Podman's --read-only / read_only_filesystem.
+	ReadOnly bool `json:"read_only,omitempty"`
+	// CapAdd lists Linux capabilities to add to the container beyond the
+	// default Podman set (for example "CAP_NET_ADMIN").
+	CapAdd []string `json:"cap_add,omitempty"`
+	// CapDrop lists Linux capabilities to drop from the container's default
+	// Podman set. Use "ALL" to drop every capability.
+	CapDrop []string `json:"cap_drop,omitempty"`
 }
 
 type InterfaceConfig struct {
@@ -368,6 +383,61 @@ func validateContainer(c ContainerConfig) error {
 	for _, v := range c.Volumes {
 		if err := validateSELinuxRelabel(v.SELinux); err != nil {
 			return fmt.Errorf("container %q volume %q: %w", c.Name, v.ContainerPath, err)
+		}
+	}
+
+	if err := validateNetworkMode(c.NetworkMode); err != nil {
+		return fmt.Errorf("container %q: %w", c.Name, err)
+	}
+
+	return validateContainerCapabilities(c)
+}
+
+func validateContainerCapabilities(c ContainerConfig) error {
+	for _, capability := range c.CapAdd {
+		if err := validateCapability(capability); err != nil {
+			return fmt.Errorf("container %q cap_add: %w", c.Name, err)
+		}
+	}
+	for _, capability := range c.CapDrop {
+		if err := validateCapability(capability); err != nil {
+			return fmt.Errorf("container %q cap_drop: %w", c.Name, err)
+		}
+	}
+	return nil
+}
+
+// validateNetworkMode accepts the Podman network-namespace modes the
+// orchestrator exposes to containers. An empty string keeps Podman's default
+// (rootful bridge). Other namespace modes (container:<id>, ns:<path>, ...)
+// are intentionally not exposed here.
+func validateNetworkMode(mode string) error {
+	switch strings.TrimSpace(mode) {
+	case "", "host", "bridge", "none", "private", "slirp4netns", "pasta":
+		return nil
+	default:
+		return fmt.Errorf("network_mode %q is not supported; expected one of host, bridge, none, private, slirp4netns, pasta", mode)
+	}
+}
+
+// validateCapability checks that a Linux capability name follows the
+// conventional CAP_* form (or the special "ALL"), uppercase ASCII with
+// underscores or digits. Podman accepts capabilities with or without the
+// CAP_ prefix, but requiring the prefix keeps configuration unambiguous.
+func validateCapability(name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("capability must not be empty")
+	}
+	if name == "ALL" {
+		return nil
+	}
+	if !strings.HasPrefix(name, "CAP_") || len(name) <= len("CAP_") {
+		return fmt.Errorf("capability %q must be \"ALL\" or start with CAP_ (for example CAP_NET_ADMIN)", name)
+	}
+	for _, r := range name {
+		if !(r == '_' || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
+			return fmt.Errorf("capability %q contains invalid character %q", name, r)
 		}
 	}
 	return nil

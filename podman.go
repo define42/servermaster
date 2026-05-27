@@ -111,7 +111,7 @@ type containerInspectConfig struct {
 // configHashLabel records, on the container, a hash of the ContainerConfig it
 // was created from. reconcileContainer uses it to leave a running container
 // untouched when its desired config is unchanged.
-const configHashLabel = "servermaster.config-hash"
+const configHashLabel = "edgecommander.config-hash"
 
 // configHash is a stable fingerprint of a container's desired configuration. Go
 // marshals struct fields in declaration order and map keys in sorted order, so

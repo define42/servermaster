@@ -21,7 +21,7 @@ const (
 	// for example a declared device that does not exist on the host — makes the
 	// apply roll back and fail at this deadline instead of blocking forever. The
 	// exec gets a slightly longer hard deadline (nmstateApplyTimeout + buffer) so
-	// a wedged nmstatectl cannot hang the reconcile, and the /servermaster/config
+	// a wedged nmstatectl cannot hang the reconcile, and the /edgecommander/config
 	// request that holds applyMu, indefinitely.
 	nmstateApplyTimeout = 60 * time.Second
 )
@@ -32,7 +32,7 @@ const (
 // a variable so tests can redirect it away from the real /etc/nmstate.
 //
 //nolint:gochecknoglobals // injectable seam so interface apply can be tested without touching /etc/nmstate.
-var nmstateStatePath = "/etc/nmstate/servermaster.yml"
+var nmstateStatePath = "/etc/nmstate/edgecommander.yml"
 
 // nmState is the subset of the nmstate desired-state schema this tool emits.
 // It is marshaled to JSON (valid YAML) and applied through NetworkManager with
@@ -139,7 +139,7 @@ func configureHostInterfaces(interfaces []InterfaceConfig, routes []RouteConfig)
 	// onto the canonical path once nmstatectl has accepted it, so a failed apply
 	// never leaves a document that nmstate.service would reapply at boot. The
 	// temp lives beside the target so the rename stays atomic on one filesystem.
-	tmp, err := os.CreateTemp(filepath.Dir(nmstateStatePath), ".servermaster.*.yml.tmp")
+	tmp, err := os.CreateTemp(filepath.Dir(nmstateStatePath), ".edgecommander.*.yml.tmp")
 	if err != nil {
 		return fmt.Errorf("create temp nmstate document in %q failed: %w", filepath.Dir(nmstateStatePath), err)
 	}

@@ -24,15 +24,15 @@ const (
 	// network — "fail safe" does not depend on the shipped systemd unit. Override
 	// it with -listen for a host:port on a trusted management network. See
 	// parseListenAddress for the accepted forms.
-	defaultListenAddress = "unix:///run/servermaster/servermaster.sock"
-	apiHealthPath        = "/servermaster/health"
-	apiStatusPath        = "/servermaster/status"
-	apiConfigPath        = "/servermaster/config"
-	apiRestartPath       = "/servermaster/restart"
-	apiOstreeUploadPath  = "/servermaster/ostree/upload"
-	apiOstreeUpgradePath = "/servermaster/ostree/upgrade"
+	defaultListenAddress = "unix:///run/edgecommander/edgecommander.sock"
+	apiHealthPath        = "/edgecommander/health"
+	apiStatusPath        = "/edgecommander/status"
+	apiConfigPath        = "/edgecommander/config"
+	apiRestartPath       = "/edgecommander/restart"
+	apiOstreeUploadPath  = "/edgecommander/ostree/upload"
+	apiOstreeUpgradePath = "/edgecommander/ostree/upgrade"
 
-	// maxConfigUploadBytes caps the body accepted by /servermaster/config. A node
+	// maxConfigUploadBytes caps the body accepted by /edgecommander/config. A node
 	// config is a small JSON document; the limit stops an unauthenticated caller
 	// from streaming an arbitrarily large body into memory.
 	maxConfigUploadBytes = 1 << 20 // 1 MiB
@@ -89,10 +89,10 @@ func newServeMux(configPath string) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+apiHealthPath, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = fmt.Fprintln(w, "servermaster running")
+		_, _ = fmt.Fprintln(w, "edgecommander running")
 	})
 	mux.HandleFunc("GET "+apiStatusPath, func(w http.ResponseWriter, r *http.Request) {
-		handleServermasterStatus(w, r, configPath)
+		handleEdgecommanderStatus(w, r, configPath)
 	})
 	configUpload := func(w http.ResponseWriter, r *http.Request) {
 		handleConfigUpload(w, r, configPath)
@@ -180,13 +180,13 @@ func listenUnix(path string) (net.Listener, error) {
 	return listener, nil
 }
 
-func handleServermasterStatus(w http.ResponseWriter, r *http.Request, configPath string) {
-	status := servermasterStatusCollector(r.Context(), configPath)
+func handleEdgecommanderStatus(w http.ResponseWriter, r *http.Request, configPath string) {
+	status := edgecommanderStatusCollector(r.Context(), configPath)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(status); err != nil {
-		log.Printf("write servermaster status failed: %v", err)
+		log.Printf("write edgecommander status failed: %v", err)
 	}
 }
 
@@ -194,7 +194,7 @@ func handleServermasterStatus(w http.ResponseWriter, r *http.Request, configPath
 // it atomically to the active config path, and converges the host to it (the
 // same reconcile that runs at startup). The validated body is what lands on
 // disk, so a successful upload becomes the new source of truth. Like the
-// /servermaster/ostree endpoints it is unauthenticated: anyone who can reach
+// /edgecommander/ostree endpoints it is unauthenticated: anyone who can reach
 // the listener can rewrite the node's folders, interfaces, firewall, and containers.
 func handleConfigUpload(w http.ResponseWriter, r *http.Request, configPath string) {
 	defer func() { _ = r.Body.Close() }()
@@ -288,7 +288,7 @@ func handleOstreeUpload(w http.ResponseWriter, r *http.Request, configPath strin
 // ostree.apply_command, or the default bootc image-mode switch onto the upload
 // path — and, unless the request sets ?reboot=false, reboots the host once the
 // command succeeds. The reboot is scheduled after the response is written so the
-// caller gets confirmation. Like the /servermaster/ostree/upload endpoint this
+// caller gets confirmation. Like the /edgecommander/ostree/upload endpoint this
 // is unauthenticated.
 func handleOstreeUpgrade(w http.ResponseWriter, r *http.Request, configPath string) {
 	cfg, err := loadConfig(configPath)

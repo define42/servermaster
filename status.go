@@ -7,13 +7,13 @@ import (
 	"time"
 )
 
-// servermasterStatusCollector gathers the /servermaster/status response. Tests
+// edgecommanderStatusCollector gathers the /edgecommander/status response. Tests
 // replace it so the handler can be exercised without requiring Podman or ostree.
 //
 //nolint:gochecknoglobals // injectable seam so the handler can be tested without Podman or ostree.
-var servermasterStatusCollector = collectServermasterStatus
+var edgecommanderStatusCollector = collectEdgecommanderStatus
 
-type servermasterStatus struct {
+type edgecommanderStatus struct {
 	Status          string                   `json:"status"`
 	GeneratedAt     string                   `json:"generated_at"`
 	Hostname        string                   `json:"hostname,omitempty"`
@@ -25,20 +25,20 @@ type servermasterStatus struct {
 	Inventory       *Inventory               `json:"inventory,omitempty"`
 	Network         networkStatus            `json:"network"`
 	Containers      []runningContainerStatus `json:"containers"`
-	ServermasterLog []string                 `json:"servermaster_log"`
+	EdgecommanderLog []string                 `json:"edgecommander_log"`
 	Errors          []string                 `json:"errors,omitempty"`
 }
 
 // recordError appends "prefix: msg" to the status errors when msg is non-empty,
 // the shared shape for collectors that report failures through an Error field.
-func (s *servermasterStatus) recordError(prefix, msg string) {
+func (s *edgecommanderStatus) recordError(prefix, msg string) {
 	if msg != "" {
 		s.Errors = append(s.Errors, fmt.Sprintf("%s: %s", prefix, msg))
 	}
 }
 
-func collectServermasterStatus(ctx context.Context, configPath string) servermasterStatus {
-	status := servermasterStatus{
+func collectEdgecommanderStatus(ctx context.Context, configPath string) edgecommanderStatus {
+	status := edgecommanderStatus{
 		Status:      "ok",
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 	}
@@ -76,7 +76,7 @@ func collectServermasterStatus(ctx context.Context, configPath string) servermas
 	status.Network = collectNetworkStatus(ctx)
 	status.recordError("network", status.Network.Error)
 
-	containers, err := collectRunningContainerStatuses(ctx, servermasterLogTail)
+	containers, err := collectRunningContainerStatuses(ctx, edgecommanderLogTail)
 	if err != nil {
 		status.Errors = append(status.Errors, fmt.Sprintf("containers: %v", err))
 	}
@@ -84,7 +84,7 @@ func collectServermasterStatus(ctx context.Context, configPath string) servermas
 	status.Errors = append(status.Errors, containerStatusErrors(containers)...)
 
 	// Captured after the other collectors so their log output is reflected.
-	status.ServermasterLog = serviceLog.snapshot()
+	status.EdgecommanderLog = serviceLog.snapshot()
 
 	if len(status.Errors) > 0 {
 		status.Status = "degraded"
@@ -95,7 +95,7 @@ func collectServermasterStatus(ctx context.Context, configPath string) servermas
 
 // collectHostnameInto records the host's current hostname, or the failure to
 // read it, into status.
-func collectHostnameInto(status *servermasterStatus) {
+func collectHostnameInto(status *edgecommanderStatus) {
 	if hostname, err := os.Hostname(); err == nil {
 		status.Hostname = hostname
 	} else {
@@ -106,7 +106,7 @@ func collectHostnameInto(status *servermasterStatus) {
 // collectInventoryInto decodes the hardware inventory into status. DMI is
 // root-only and absent on some hosts, so a failure is recorded as a status error
 // and the inventory is left unset.
-func collectInventoryInto(status *servermasterStatus) {
+func collectInventoryInto(status *edgecommanderStatus) {
 	inventory, err := collectInventory()
 	if err != nil {
 		status.Errors = append(status.Errors, fmt.Sprintf("inventory: %v", err))

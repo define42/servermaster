@@ -1,18 +1,18 @@
-# servermaster
-[![codecov](https://codecov.io/gh/define42/servermaster/graph/badge.svg?token=CI1DDQT3O4)](https://codecov.io/gh/define42/servermaster)
-`servermaster` is a Go service for declaratively configuring a Red Hat Device
+# edgecommander
+[![codecov](https://codecov.io/gh/define42/edgecommander/graph/badge.svg?token=CI1DDQT3O4)](https://codecov.io/gh/define42/edgecommander)
+`edgecommander` is a Go service for declaratively configuring a Red Hat Device
 Edge node without MicroShift. It manages host folders, host files, host network
 interfaces, firewalld ports, OS update staging, and Podman containers directly
 from one JSON configuration file.
 
 The active config file is the source of truth for the node. On every reconcile,
-`servermaster` stops any running container that is not declared in that config.
+`edgecommander` stops any running container that is not declared in that config.
 Do not start ad-hoc containers and expect them to survive; add them to the
 config instead.
 
 ## What It Does
 
-On startup, and after a successful remote config upload, `servermaster`:
+On startup, and after a successful remote config upload, `edgecommander`:
 
 1. Starts the HTTP API on the `-listen` address (a Unix socket by default; see
    [Listen Address](#listen-address)).
@@ -35,10 +35,10 @@ On startup, and after a successful remote config upload, `servermaster`:
 ## Usage
 
 ```sh
-servermaster -config /etc/servermaster.json
+edgecommander -config /etc/edgecommander.json
 ```
 
-If `-config` is omitted, it defaults to `/etc/servermaster.json`.
+If `-config` is omitted, it defaults to `/etc/edgecommander.json`.
 The binary has no `install` subcommand or flag; it always starts the service
 process.
 
@@ -49,7 +49,7 @@ the host, but against the named file only — it parses the JSON, checks every
 field, and exits without starting the web server or changing the host:
 
 ```sh
-servermaster -validatefile config.json
+edgecommander -validatefile config.json
 ```
 
 It prints `config config.json is valid` and exits `0` when the file parses and
@@ -59,12 +59,12 @@ otherwise. Use it to check a `config.json` before deploying it.
 ### Listen Address
 
 `-listen` controls where the HTTP API binds (default
-`unix:///run/servermaster/servermaster.sock`):
+`unix:///run/edgecommander/edgecommander.sock`):
 
 - `:8080` — TCP on all interfaces.
 - `127.0.0.1:8080` — TCP on loopback only, so the API is reachable only from
   the node itself (for example behind an SSH tunnel or a local reverse proxy).
-- `unix:///run/servermaster/servermaster.sock` — a Unix-domain socket. The
+- `unix:///run/edgecommander/edgecommander.sock` — a Unix-domain socket. The
   parent directory is created, a stale socket from an earlier run is cleared,
   and the socket is mode `0660` (not world-accessible). Use the socket's owning
   group to grant access. A relative path resolves against the process working
@@ -78,15 +78,15 @@ only to expose the API on a trusted management network, and prefer loopback
 (`127.0.0.1:8080`) over all interfaces (`:8080`) when you do.
 
 ```sh
-servermaster -config /etc/servermaster.json -listen 127.0.0.1:8080
-servermaster -config /etc/servermaster.json -listen unix:///run/servermaster/servermaster.sock
+edgecommander -config /etc/edgecommander.json -listen 127.0.0.1:8080
+edgecommander -config /etc/edgecommander.json -listen unix:///run/edgecommander/edgecommander.sock
 ```
 
 Reach a Unix-socket listener with `curl --unix-socket` (the host in the URL is
 ignored):
 
 ```sh
-curl --unix-socket /run/servermaster/servermaster.sock http://localhost/servermaster/status
+curl --unix-socket /run/edgecommander/edgecommander.sock http://localhost/edgecommander/status
 ```
 
 ## Installation
@@ -99,8 +99,8 @@ so the build host needs only the Go toolchain.
 
 The RPM installs:
 
-- `servermaster` to `/usr/bin/servermaster`
-- `servermaster.service` to `/usr/lib/systemd/system/servermaster.service`
+- `edgecommander` to `/usr/bin/edgecommander`
+- `edgecommander.service` to `/usr/lib/systemd/system/edgecommander.service`
 
 It declares `Requires: podman, nmstate`, `Recommends: firewalld`, and uses
 systemd scriptlets to reload and restart the service when appropriate.
@@ -115,7 +115,7 @@ Tagged GitHub releases attach prebuilt `x86_64` and `aarch64` RPMs.
 
 ## HTTP API
 
-All HTTP endpoints live under `/servermaster/*` and are unauthenticated. Anyone
+All HTTP endpoints live under `/edgecommander/*` and are unauthenticated. Anyone
 who can reach the listener can rewrite the node's config, run the ostree apply
 command, and reboot the host — that is, it is root-equivalent. Expose it only on
 a trusted management network, or restrict the listener with `-listen` (loopback
@@ -123,15 +123,15 @@ or a Unix socket; see [Listen Address](#listen-address)).
 
 The `curl http://node:8080/...` examples below assume a TCP `-listen`. With the
 default Unix socket, reach the same endpoints with
-`curl --unix-socket /run/servermaster/servermaster.sock http://localhost/...`.
+`curl --unix-socket /run/edgecommander/edgecommander.sock http://localhost/...`.
 
 ### Health
 
-`GET /servermaster/health` returns a plain-text liveness response.
+`GET /edgecommander/health` returns a plain-text liveness response.
 
 ### Status
 
-`GET /servermaster/status` returns a pretty-printed JSON status document with:
+`GET /edgecommander/status` returns a pretty-printed JSON status document with:
 
 - the node's current `hostname`
 - `uptime`: how long the host has been running, as whole `seconds` plus a
@@ -155,17 +155,17 @@ default Unix socket, reach the same endpoints with
 - running Podman containers
 - image and version metadata where available
 - the last 100 log lines from each running container
-- `servermaster_log`: the last 100 log lines from the `servermaster` service
+- `edgecommander_log`: the last 100 log lines from the `edgecommander` service
   itself (its own `log` output, also sent to stderr/journald)
 - status collection errors, if any
 
 ```sh
-curl http://node:8080/servermaster/status
+curl http://node:8080/edgecommander/status
 ```
 
 ### Remote Configuration
 
-`POST /servermaster/config` and `PUT /servermaster/config` accept a raw config
+`POST /edgecommander/config` and `PUT /edgecommander/config` accept a raw config
 JSON document. The service validates the body, writes it atomically to the active
 `-config` path, and immediately reconciles the node to the new desired state.
 
@@ -175,36 +175,36 @@ JSON document. The service validates the body, writes it atomically to the activ
 - Request bodies are capped at 1 MiB.
 
 ```sh
-curl -X POST --data-binary @config.json http://node:8080/servermaster/config
+curl -X POST --data-binary @config.json http://node:8080/edgecommander/config
 ```
 
 ### Restart
 
-`POST /servermaster/restart` schedules a host reboot. The response is written
+`POST /edgecommander/restart` schedules a host reboot. The response is written
 before the reboot is triggered.
 
 ```sh
-curl -X POST http://node:8080/servermaster/restart
+curl -X POST http://node:8080/edgecommander/restart
 ```
 
 ### OS Updates
 
 The OS update endpoints stage and apply an ostree/bootc update tarball:
 
-- `POST /servermaster/ostree/upload` streams the request body to
+- `POST /edgecommander/ostree/upload` streams the request body to
   `ostree.upload_path`. The body is written to a temporary file and renamed into
   place after upload.
-- `POST /servermaster/ostree/upgrade` runs `ostree.apply_command` and reboots
+- `POST /edgecommander/ostree/upgrade` runs `ostree.apply_command` and reboots
   the host after a successful apply. When `apply_command` is not configured it
   defaults to a bootc image-mode switch onto the upload path, so no `ostree`
   config is required on a standard bootc node.
 
-Pass `?reboot=false` to `/servermaster/ostree/upgrade` to apply without
+Pass `?reboot=false` to `/edgecommander/ostree/upgrade` to apply without
 rebooting.
 
 ```sh
-curl --data-binary @update.tar http://node:8080/servermaster/ostree/upload
-curl -X POST http://node:8080/servermaster/ostree/upgrade
+curl --data-binary @update.tar http://node:8080/edgecommander/ostree/upload
+curl -X POST http://node:8080/edgecommander/ostree/upgrade
 ```
 
 ## Configuration
@@ -218,7 +218,7 @@ Top-level fields:
 - `routes`: optional list of static routes (default routes and routing tables)
 - `firewall_ports`: optional list of firewalld ports to open
 - `containers`: list of container definitions
-- `ostree`: optional OS update settings for the `/servermaster/ostree/*` endpoints
+- `ostree`: optional OS update settings for the `/edgecommander/ostree/*` endpoints
 
 ### Hostname
 
@@ -233,7 +233,7 @@ reverse lookups still resolve via DNS or `/etc/hosts`, which `hostnamectl` does
 not modify. Reconcile only invokes `hostnamectl` when the declared name differs
 from the running one. Omitting `hostname` (or leaving it empty) leaves the
 host's hostname unmanaged. The current hostname is also reported in
-`/servermaster/status`.
+`/edgecommander/status`.
 
 ### Folders
 
@@ -268,7 +268,7 @@ directories created as needed. Content comes from the config itself.
 ### Interfaces
 
 Host interface changes are applied through NetworkManager with `nmstatectl`.
-The generated desired state is written to `/etc/nmstate/servermaster.yml` and
+The generated desired state is written to `/etc/nmstate/edgecommander.yml` and
 applied with `nmstatectl apply`, so the configuration persists across reboots
 and is reapplied by `nmstate.service`. The apply is bounded by a timeout: an
 interface that cannot reach its desired state fails the reconcile (with the
@@ -361,7 +361,7 @@ An interface that leases its IPv4 address over DHCP:
 ### Routes
 
 Static routes are applied through NetworkManager with `nmstatectl`, in the same
-desired-state document as the interfaces (`/etc/nmstate/servermaster.yml`), so
+desired-state document as the interfaces (`/etc/nmstate/edgecommander.yml`), so
 they persist across reboots and are reapplied by `nmstate.service`. Routes
 declared here are **additive** to the per-interface default route derived from an
 interface's `gateway`: use `gateway` for a simple default route, and `routes` for
@@ -418,12 +418,12 @@ table 100 with a metric:
 Firewall ports are opened through firewalld's D-Bus API. Each declaration is
 written to both runtime configuration for immediate effect and permanent
 configuration for reload and reboot persistence. An empty `zone` uses
-firewalld's default zone. `servermaster` starts `firewalld.service` first
+firewalld's default zone. `edgecommander` starts `firewalld.service` first
 (firewalld is not D-Bus activatable on a default install), so a stopped
 firewalld is brought up automatically rather than failing the apply.
 
 `firewall_ports` is the single source of truth for the entire firewall surface:
-on every reconcile `servermaster` closes any port open in firewalld — in any
+on every reconcile `edgecommander` closes any port open in firewalld — in any
 zone, in both runtime and permanent config — that is not declared here, and
 **removes every firewalld service** (for example `ssh`, `cockpit`, `dhcpv6-client`),
 just as it stops undeclared containers. Access is expressed as ports (optionally
@@ -444,7 +444,7 @@ ports are declared it is an error, since the config cannot be satisfied.
 - `port`: port or port range as a string, for example `8080` or `8000-8010`
 - `protocol`: protocol; `tcp` default, supports `tcp`, `udp`, `sctp`, and `dccp`
 - `source`: optional remote source IP or CIDR (for example `10.0.0.10` or
-  `10.0.0.0/24`); when set, servermaster uses a firewalld rich rule so only
+  `10.0.0.0/24`); when set, edgecommander uses a firewalld rich rule so only
   traffic from that source can reach the port
 
 ### Ostree
@@ -452,9 +452,9 @@ ports are declared it is an error, since the config cannot be satisfied.
 The whole `ostree` block is optional; omit it and the defaults below apply, so a
 standard bootc (image-mode) Device Edge node needs no ostree config.
 
-- `upload_path`: where `/servermaster/ostree/upload` writes the uploaded image;
+- `upload_path`: where `/edgecommander/ostree/upload` writes the uploaded image;
   defaults to `/var/data/ostree/update.tar`
-- `apply_command`: argv list run by `/servermaster/ostree/upgrade` to apply the
+- `apply_command`: argv list run by `/edgecommander/ostree/upgrade` to apply the
   staged image; defaults to a bootc image-mode switch onto the upload path:
   `["bootc", "switch", "--transport", "oci-archive", "<upload_path>"]`. Override
   this on non-bootc (rpm-ostree) nodes.
@@ -462,8 +462,8 @@ standard bootc (image-mode) Device Edge node needs no ostree config.
 ### Containers
 
 A declared container is recreated only when its configuration changes.
-`servermaster` records a hash of each container's config in the
-`servermaster.config-hash` label; on reconcile, a container already running with
+`edgecommander` records a hash of each container's config in the
+`edgecommander.config-hash` label; on reconcile, a container already running with
 a matching hash is left untouched — not stopped, re-pulled, or recreated. A
 container is (re)created when it is missing, stopped, its config changed, or it
 predates the label.

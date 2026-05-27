@@ -1,19 +1,19 @@
 [Unit]
-Description=Servermaster Node Configuration Service
+Description=Edgecommander Node Configuration Service
 After=network-online.target podman.socket firewalld.service
 Wants=network-online.target
 Requires=podman.socket
 
 [Service]
 Type=simple
-# systemd creates /run/servermaster (owned by the service, removed on stop),
+# systemd creates /run/edgecommander (owned by the service, removed on stop),
 # which holds the Unix socket the API listens on below.
-RuntimeDirectory=servermaster
+RuntimeDirectory=edgecommander
 # The API is unauthenticated and root-equivalent, so by default it binds to a
-# Unix socket (mode 0660) at /run/servermaster/servermaster.sock rather than a
+# Unix socket (mode 0660) at /run/edgecommander/edgecommander.sock rather than a
 # TCP port. To expose it over the network instead, set -listen to a host:port
 # such as 127.0.0.1:8080 (loopback) or :8080 (all interfaces).
-ExecStart=/usr/bin/servermaster -config /etc/servermaster.json -listen unix:///run/servermaster/servermaster.sock
+ExecStart=/usr/bin/edgecommander -config /etc/edgecommander.json -listen unix:///run/edgecommander/edgecommander.sock
 Restart=always
 RestartSec=10s
 User=root

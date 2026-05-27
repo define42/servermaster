@@ -14,7 +14,7 @@ const (
 	// StartUnitContext returns once the job is enqueued; its result arrives later
 	// on a channel, so without this bound a unit that hangs in activation would
 	// block the reconcile — which holds applyMu — and every later
-	// /servermaster/config upload, forever.
+	// /edgecommander/config upload, forever.
 	systemdJobTimeout = 60 * time.Second
 )
 

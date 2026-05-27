@@ -36,8 +36,8 @@ func TestPackageRelations(t *testing.T) {
 // begins with the magic bytes 0xED 0xAB 0xEE 0xDB).
 func TestWriteRPM(t *testing.T) {
 	dir := t.TempDir()
-	bin := filepath.Join(dir, "servermaster")
-	unit := filepath.Join(dir, "servermaster.service")
+	bin := filepath.Join(dir, "edgecommander")
+	unit := filepath.Join(dir, "edgecommander.service")
 	license := filepath.Join(dir, "LICENSE")
 	out := filepath.Join(dir, "out.rpm")
 	for _, f := range []string{bin, unit, license} {
@@ -51,7 +51,7 @@ func TestWriteRPM(t *testing.T) {
 		release:    "1",
 		arch:       "x86_64",
 		binarySrc:  bin,
-		binaryDest: "/usr/bin/servermaster",
+		binaryDest: "/usr/bin/edgecommander",
 		unitSrc:    unit,
 		licenseSrc: license,
 		out:        out,
@@ -76,7 +76,7 @@ func TestWriteRPMMissingBinary(t *testing.T) {
 		release:    "1",
 		arch:       "x86_64",
 		binarySrc:  filepath.Join(t.TempDir(), "absent"),
-		binaryDest: "/usr/bin/servermaster",
+		binaryDest: "/usr/bin/edgecommander",
 		out:        filepath.Join(t.TempDir(), "out.rpm"),
 	}
 	if err := writeRPM(o); err == nil {
@@ -95,8 +95,8 @@ func TestMainWritesRPM(t *testing.T) {
 	})
 
 	dir := t.TempDir()
-	bin := filepath.Join(dir, "servermaster")
-	unit := filepath.Join(dir, "servermaster.service")
+	bin := filepath.Join(dir, "edgecommander")
+	unit := filepath.Join(dir, "edgecommander.service")
 	license := filepath.Join(dir, "LICENSE")
 	out := filepath.Join(dir, "from-main.rpm")
 	for _, f := range []string{bin, unit, license} {
@@ -127,8 +127,8 @@ func TestMainWritesRPM(t *testing.T) {
 
 func TestWriteRPMOutputCreateError(t *testing.T) {
 	dir := t.TempDir()
-	bin := filepath.Join(dir, "servermaster")
-	unit := filepath.Join(dir, "servermaster.service")
+	bin := filepath.Join(dir, "edgecommander")
+	unit := filepath.Join(dir, "edgecommander.service")
 	license := filepath.Join(dir, "LICENSE")
 	blocker := filepath.Join(dir, "blocker")
 	for _, f := range []string{bin, unit, license, blocker} {
@@ -142,7 +142,7 @@ func TestWriteRPMOutputCreateError(t *testing.T) {
 		release:    "1",
 		arch:       "x86_64",
 		binarySrc:  bin,
-		binaryDest: "/usr/bin/servermaster",
+		binaryDest: "/usr/bin/edgecommander",
 		unitSrc:    unit,
 		licenseSrc: license,
 		out:        filepath.Join(blocker, "out.rpm"),

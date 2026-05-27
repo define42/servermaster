@@ -1,4 +1,4 @@
-// Command servermaster reconciles a Red Hat Device Edge node to a JSON
+// Command edgecommander reconciles a Red Hat Device Edge node to a JSON
 // configuration: it manages host folders and files, host network interfaces
 // (through nmstate), firewalld ports, and the Podman containers that should be
 // present, treating config.json as the single source of truth for node state.
@@ -14,13 +14,13 @@ import (
 )
 
 const (
-	defaultConfigPath = "/etc/servermaster.json"
+	defaultConfigPath = "/etc/edgecommander.json"
 )
 
 func main() {
 	configPath := flag.String("config", defaultConfigPath, "path to config JSON file")
 	validateFilePath := flag.String("validatefile", "", "validate the given config JSON file and exit, without starting the service or changing the host")
-	listenAddress := flag.String("listen", defaultListenAddress, `web server listen address: a host:port for TCP (":8080" for all interfaces, "127.0.0.1:8080" for loopback only) or a Unix socket path ("unix:///run/servermaster/servermaster.sock")`)
+	listenAddress := flag.String("listen", defaultListenAddress, `web server listen address: a host:port for TCP (":8080" for all interfaces, "127.0.0.1:8080" for loopback only) or a Unix socket path ("unix:///run/edgecommander/edgecommander.sock")`)
 	flag.Parse()
 
 	// -validatefile is a one-shot check: load and validate the named config, then

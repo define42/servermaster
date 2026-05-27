@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestCollectServermasterStatus(t *testing.T) {
+func TestCollectEdgecommanderStatus(t *testing.T) {
 	links, addrs := testNetworkLinks()
 	defer stubNetlink(links, addrs, nil, nil)()
 
@@ -18,7 +18,7 @@ func TestCollectServermasterStatus(t *testing.T) {
 	cfgPath := writeTempConfig(t, `{"podman_mode":"rootful"}`)
 	t.Setenv("PATH", "") // ostree tooling unavailable -> recorded as an error
 
-	status := collectServermasterStatus(context.Background(), cfgPath)
+	status := collectEdgecommanderStatus(context.Background(), cfgPath)
 	if status.Status != "degraded" {
 		t.Fatalf("status = %q, want degraded (ostree unavailable)", status.Status)
 	}

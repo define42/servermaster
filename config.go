@@ -85,6 +85,7 @@ type InterfaceConfig struct {
 	// applied via netlink after the nmstate apply. A nil value leaves it untouched.
 	TxQueueLen *int        `json:"txqueuelen,omitempty"`
 	VLAN       *VLANConfig `json:"vlan,omitempty"`
+	Bond       *BondConfig `json:"bond,omitempty"`
 }
 
 // VLANConfig describes an 802.1Q VLAN interface (type "vlan"): the VLAN rides on
@@ -93,6 +94,29 @@ type InterfaceConfig struct {
 type VLANConfig struct {
 	BaseInterface string `json:"base_interface"`
 	ID            int    `json:"id"`
+}
+
+// BondConfig describes a Linux bonding interface (type "bond"): two or more
+// member interfaces (Ports) are aggregated under one logical bond, with traffic
+// distributed or failed over according to Mode. The bond device's own name is
+// the enclosing interface Name (for example "bond0"). Members listed in Ports
+// are enslaved to the bond by nmstate; they need not be declared separately
+// under interfaces.
+type BondConfig struct {
+	// Mode is the bonding mode mirroring the kernel/nmstate names:
+	// "balance-rr", "active-backup", "balance-xor", "broadcast", "802.3ad"
+	// (LACP), "balance-tlb", or "balance-alb".
+	Mode string `json:"mode"`
+	// Ports lists the member interface names enslaved to the bond. At least
+	// one port is required; duplicates and the bond's own name are rejected.
+	Ports []string `json:"ports"`
+	// Miimon is the MII link-monitoring interval in milliseconds applied to the
+	// bond (kernel bonding option `miimon`). A nil value leaves it untouched.
+	Miimon *int `json:"miimon,omitempty"`
+	// Primary names the preferred member for failover-style modes
+	// ("active-backup", "balance-tlb", "balance-alb"); it must be one of Ports.
+	// "" leaves nmstate at its default.
+	Primary string `json:"primary,omitempty"`
 }
 
 // RouteConfig is a static route installed through nmstate, and so persisted

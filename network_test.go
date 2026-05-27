@@ -293,6 +293,78 @@ func TestBuildNMStateVLANErrors(t *testing.T) {
 	})
 }
 
+func TestBuildNMStateBond(t *testing.T) {
+	state, err := buildNMState([]InterfaceConfig{{
+		Name:      "bond0",
+		Type:      "bond",
+		IPAddress: "192.168.1.50",
+		Subnet:    "192.168.1.0/24",
+		Bond: &BondConfig{
+			Mode:    "active-backup",
+			Ports:   []string{"eth1", "eth2"},
+			Miimon:  intPtr(100),
+			Primary: "eth1",
+		},
+	}}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	iface := state.Interfaces[0]
+	if iface.Type != "bond" || iface.LinkAggregation == nil {
+		t.Fatalf("bond interface mismatch: %+v", iface)
+	}
+	agg := iface.LinkAggregation
+	if agg.Mode != "active-backup" {
+		t.Fatalf("bond mode = %q, want active-backup", agg.Mode)
+	}
+	if !reflect.DeepEqual(agg.Port, []string{"eth1", "eth2"}) {
+		t.Fatalf("bond ports = %v, want [eth1 eth2]", agg.Port)
+	}
+	if agg.Options == nil || agg.Options.Miimon == nil || *agg.Options.Miimon != 100 {
+		t.Fatalf("bond miimon mismatch: %+v", agg.Options)
+	}
+	if agg.Options.Primary != "eth1" {
+		t.Fatalf("bond primary = %q, want eth1", agg.Options.Primary)
+	}
+	if iface.IPv4 == nil || iface.IPv4.Addresses[0].IP != "192.168.1.50" {
+		t.Fatalf("bond ipv4 mismatch: %+v", iface.IPv4)
+	}
+}
+
+func TestBuildNMStateBondNoOptions(t *testing.T) {
+	state, err := buildNMState([]InterfaceConfig{{
+		Name: "bond0",
+		Type: "bond",
+		Bond: &BondConfig{Mode: "802.3ad", Ports: []string{"eth1", "eth2"}},
+	}}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	agg := state.Interfaces[0].LinkAggregation
+	if agg == nil || agg.Mode != "802.3ad" {
+		t.Fatalf("bond mismatch: %+v", agg)
+	}
+	if agg.Options != nil {
+		t.Fatalf("bond options = %+v, want nil when no options declared", agg.Options)
+	}
+}
+
+func TestBuildNMStateBondErrors(t *testing.T) {
+	assertBuildNMStateErrors(t, []nmStateErrorCase{
+		{"bond type without settings", InterfaceConfig{Name: "bond0", Type: "bond"}},
+		{"bond missing mode", InterfaceConfig{Name: "bond0", Type: "bond", Bond: &BondConfig{Ports: []string{"eth1"}}}},
+		{"bond invalid mode", InterfaceConfig{Name: "bond0", Type: "bond", Bond: &BondConfig{Mode: "bogus", Ports: []string{"eth1"}}}},
+		{"bond no ports", InterfaceConfig{Name: "bond0", Type: "bond", Bond: &BondConfig{Mode: "active-backup"}}},
+		{"bond empty port", InterfaceConfig{Name: "bond0", Type: "bond", Bond: &BondConfig{Mode: "active-backup", Ports: []string{"eth1", ""}}}},
+		{"bond duplicate port", InterfaceConfig{Name: "bond0", Type: "bond", Bond: &BondConfig{Mode: "active-backup", Ports: []string{"eth1", "eth1"}}}},
+		{"bond self port", InterfaceConfig{Name: "bond0", Type: "bond", Bond: &BondConfig{Mode: "active-backup", Ports: []string{"bond0"}}}},
+		{"bond miimon negative", InterfaceConfig{Name: "bond0", Type: "bond", Bond: &BondConfig{Mode: "active-backup", Ports: []string{"eth1"}, Miimon: intPtr(-1)}}},
+		{"bond primary not a port", InterfaceConfig{Name: "bond0", Type: "bond", Bond: &BondConfig{Mode: "active-backup", Ports: []string{"eth1"}, Primary: "eth9"}}},
+		{"bond primary on unsupported mode", InterfaceConfig{Name: "bond0", Type: "bond", Bond: &BondConfig{Mode: "balance-rr", Ports: []string{"eth1", "eth2"}, Primary: "eth1"}}},
+		{"bond settings on non-bond type", InterfaceConfig{Name: "eth0", Type: "ethernet", Bond: &BondConfig{Mode: "active-backup", Ports: []string{"eth1"}}}},
+	})
+}
+
 func TestBuildNMStateIPv6Gateway(t *testing.T) {
 	state, err := buildNMState([]InterfaceConfig{{
 		Name:      "eth0",

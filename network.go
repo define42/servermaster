@@ -47,18 +47,34 @@ type nmState struct {
 }
 
 type nmInterface struct {
-	Name  string     `json:"name"`
-	Type  string     `json:"type"`
-	State string     `json:"state"`
-	MTU   *int       `json:"mtu,omitempty"`
-	IPv4  *nmIPStack `json:"ipv4,omitempty"`
-	IPv6  *nmIPStack `json:"ipv6,omitempty"`
-	VLAN  *nmVLAN    `json:"vlan,omitempty"`
+	Name            string             `json:"name"`
+	Type            string             `json:"type"`
+	State           string             `json:"state"`
+	MTU             *int               `json:"mtu,omitempty"`
+	IPv4            *nmIPStack         `json:"ipv4,omitempty"`
+	IPv6            *nmIPStack         `json:"ipv6,omitempty"`
+	VLAN            *nmVLAN            `json:"vlan,omitempty"`
+	LinkAggregation *nmLinkAggregation `json:"link-aggregation,omitempty"`
 }
 
 type nmVLAN struct {
 	BaseIface string `json:"base-iface"`
 	ID        int    `json:"id"`
+}
+
+// nmLinkAggregation is nmstate's bond / link-aggregation block. Port lists the
+// member interfaces enslaved to the bond; Options carries the kernel bonding
+// options nmstate forwards verbatim (only those declared in BondConfig are
+// emitted).
+type nmLinkAggregation struct {
+	Mode    string         `json:"mode"`
+	Port    []string       `json:"port"`
+	Options *nmBondOptions `json:"options,omitempty"`
+}
+
+type nmBondOptions struct {
+	Miimon  *int   `json:"miimon,omitempty"`
+	Primary string `json:"primary,omitempty"`
 }
 
 type nmIPStack struct {
@@ -324,9 +340,9 @@ func buildNMInterface(iface InterfaceConfig, label string) (nmInterface, error) 
 
 	// Defaults to a physical NIC (the documented use case, e.g. eth0). An
 	// explicit type lets nmstate manage other kinds it supports — "dummy" for
-	// a software test interface, or "vlan" for an 802.1Q tagged interface.
-	// nmstate validates the value at apply time. Bonds and bridges need extra
-	// params and remain out of scope for this schema.
+	// a software test interface, "vlan" for an 802.1Q tagged interface, or
+	// "bond" for a Linux link-aggregation interface. nmstate validates the
+	// value at apply time. Bridges need extra params and remain out of scope.
 	ifaceType := strings.TrimSpace(iface.Type)
 	if ifaceType == "" {
 		ifaceType = "ethernet"
@@ -339,23 +355,14 @@ func buildNMInterface(iface InterfaceConfig, label string) (nmInterface, error) 
 	}
 	nmIface.VLAN = vlan
 
-	if iface.IPAddress != "" {
-		ipNet, err := parseInterfaceAddress(iface.IPAddress, iface.Subnet)
-		if err != nil {
-			return nmInterface{}, fmt.Errorf("invalid host interface %s address: %w", label, err)
-		}
+	bond, err := interfaceBond(iface, label, ifaceType)
+	if err != nil {
+		return nmInterface{}, err
+	}
+	nmIface.LinkAggregation = bond
 
-		prefix, _ := ipNet.Mask.Size()
-		stack := &nmIPStack{
-			Enabled:   true,
-			DHCP:      false,
-			Addresses: []nmAddress{{IP: ipNet.IP.String(), PrefixLength: prefix}},
-		}
-		if ipNet.IP.To4() != nil {
-			nmIface.IPv4 = stack
-		} else {
-			nmIface.IPv6 = stack
-		}
+	if err := applyStaticAddress(&nmIface, iface, label); err != nil {
+		return nmInterface{}, err
 	}
 
 	if err := applyIPv4Settings(&nmIface, iface, label); err != nil {
@@ -367,6 +374,31 @@ func buildNMInterface(iface InterfaceConfig, label string) (nmInterface, error) 
 	}
 
 	return nmIface, nil
+}
+
+// applyStaticAddress sets nmIface's IPv4 or IPv6 static address (whichever
+// family ip_address belongs to) when one is declared. The interface-config
+// check that ip_address and subnet are declared together has already run.
+func applyStaticAddress(nmIface *nmInterface, iface InterfaceConfig, label string) error {
+	if iface.IPAddress == "" {
+		return nil
+	}
+	ipNet, err := parseInterfaceAddress(iface.IPAddress, iface.Subnet)
+	if err != nil {
+		return fmt.Errorf("invalid host interface %s address: %w", label, err)
+	}
+	prefix, _ := ipNet.Mask.Size()
+	stack := &nmIPStack{
+		Enabled:   true,
+		DHCP:      false,
+		Addresses: []nmAddress{{IP: ipNet.IP.String(), PrefixLength: prefix}},
+	}
+	if ipNet.IP.To4() != nil {
+		nmIface.IPv4 = stack
+	} else {
+		nmIface.IPv6 = stack
+	}
+	return nil
 }
 
 // ipv4MethodStack builds the nmstate IPv4 stack for a supported ipv4_method,
@@ -489,6 +521,127 @@ func interfaceVLAN(iface InterfaceConfig, label, ifaceType string) (*nmVLAN, err
 	default:
 		return nil, nil
 	}
+}
+
+// validBondModes lists the kernel bonding modes nmstate accepts. Mode names
+// match the kernel/nmstate identifiers; the legacy numeric aliases are not
+// supported.
+//
+//nolint:gochecknoglobals // immutable lookup set shared by validation.
+var validBondModes = map[string]struct{}{
+	"balance-rr":    {},
+	"active-backup": {},
+	"balance-xor":   {},
+	"broadcast":     {},
+	"802.3ad":       {},
+	"balance-tlb":   {},
+	"balance-alb":   {},
+}
+
+// primarySupportingBondModes lists the bonding modes where a single member is
+// preferred as the active link and the `primary` option therefore applies.
+//
+//nolint:gochecknoglobals // immutable lookup set shared by validation.
+var primarySupportingBondModes = map[string]struct{}{
+	"active-backup": {},
+	"balance-tlb":   {},
+	"balance-alb":   {},
+}
+
+// maxBondMiimon is the largest accepted value for the bond `miimon` option:
+// the kernel stores it in an unsigned 32-bit field.
+const maxBondMiimon = 0xFFFFFFFF
+
+// interfaceBond validates and builds an interface's bond settings. It returns
+// nil when the interface is not a bond, and an error when bond settings are
+// missing for a "bond" interface or present on a non-bond one.
+func interfaceBond(iface InterfaceConfig, label, ifaceType string) (*nmLinkAggregation, error) {
+	switch {
+	case ifaceType == "bond":
+		if iface.Bond == nil {
+			return nil, fmt.Errorf("host interface %s is type bond but has no bond settings", label)
+		}
+		return buildBond(iface, label)
+	case iface.Bond != nil:
+		return nil, fmt.Errorf("host interface %s sets bond settings but type is %q, not \"bond\"", label, ifaceType)
+	default:
+		return nil, nil
+	}
+}
+
+// buildBond validates a bond's mode, members, and options and returns the
+// nmstate link-aggregation block. The caller has already confirmed iface.Bond
+// is non-nil.
+func buildBond(iface InterfaceConfig, label string) (*nmLinkAggregation, error) {
+	bond := iface.Bond
+	mode := strings.TrimSpace(bond.Mode)
+	if mode == "" {
+		return nil, fmt.Errorf("host interface %s bond is missing mode", label)
+	}
+	if _, ok := validBondModes[mode]; !ok {
+		return nil, fmt.Errorf("host interface %s bond has invalid mode %q (want balance-rr, active-backup, balance-xor, broadcast, 802.3ad, balance-tlb, or balance-alb)", label, bond.Mode)
+	}
+
+	if len(bond.Ports) == 0 {
+		return nil, fmt.Errorf("host interface %s bond must list at least one port", label)
+	}
+
+	ports := make([]string, 0, len(bond.Ports))
+	seen := make(map[string]struct{}, len(bond.Ports))
+	for i, raw := range bond.Ports {
+		port := strings.TrimSpace(raw)
+		if port == "" {
+			return nil, fmt.Errorf("host interface %s bond port #%d is empty", label, i)
+		}
+		if port == iface.Name {
+			return nil, fmt.Errorf("host interface %s bond cannot list itself %q as a port", label, port)
+		}
+		if _, dup := seen[port]; dup {
+			return nil, fmt.Errorf("host interface %s bond lists port %q more than once", label, port)
+		}
+		seen[port] = struct{}{}
+		ports = append(ports, port)
+	}
+
+	agg := &nmLinkAggregation{Mode: mode, Port: ports}
+
+	options, err := buildBondOptions(bond, mode, label, seen)
+	if err != nil {
+		return nil, err
+	}
+	agg.Options = options
+
+	return agg, nil
+}
+
+// buildBondOptions validates and assembles the optional bond options (miimon,
+// primary). It returns nil when no options are declared so the nmstate document
+// stays minimal. ports is the set of declared port names, used to confirm
+// primary names a real member.
+func buildBondOptions(bond *BondConfig, mode, label string, ports map[string]struct{}) (*nmBondOptions, error) {
+	var opts *nmBondOptions
+
+	if bond.Miimon != nil {
+		if *bond.Miimon < 0 || uint64(*bond.Miimon) > maxBondMiimon {
+			return nil, fmt.Errorf("host interface %s bond miimon %d must be between 0 and %d", label, *bond.Miimon, uint64(maxBondMiimon))
+		}
+		opts = &nmBondOptions{Miimon: bond.Miimon}
+	}
+
+	if primary := strings.TrimSpace(bond.Primary); primary != "" {
+		if _, ok := primarySupportingBondModes[mode]; !ok {
+			return nil, fmt.Errorf("host interface %s bond primary %q is only valid for modes active-backup, balance-tlb, or balance-alb (got %q)", label, primary, mode)
+		}
+		if _, ok := ports[primary]; !ok {
+			return nil, fmt.Errorf("host interface %s bond primary %q is not listed in ports", label, primary)
+		}
+		if opts == nil {
+			opts = &nmBondOptions{}
+		}
+		opts.Primary = primary
+	}
+
+	return opts, nil
 }
 
 // gatewayRoute builds the default route for an interface's gateway, returning

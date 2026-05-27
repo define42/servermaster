@@ -282,9 +282,9 @@ list.
 
 - `name`: host interface name, for example `eth0` (or `eth0.100` for a VLAN)
 - `type`: nmstate interface type; defaults to `ethernet`. Set `dummy` for a
-  software test interface, or `vlan` for an 802.1Q tagged interface. The value is
-  passed to nmstate, which validates it; bonds and bridges need extra parameters
-  and are not supported here.
+  software test interface, `vlan` for an 802.1Q tagged interface, or `bond` for
+  a Linux bonding (link-aggregation) interface. The value is passed to nmstate,
+  which validates it; bridges need extra parameters and are not supported here.
 - `ip_address`: static IP to assign to the host interface
 - `subnet`: subnet CIDR for the host interface
 - `gateway`: default gateway IP for the host interface
@@ -322,6 +322,16 @@ list.
 - `vlan`: required when `type` is `vlan`; the VLAN settings:
   - `base_interface`: the interface the VLAN rides on, for example `eth0`
   - `id`: the 802.1Q VLAN tag, `1`–`4094`
+- `bond`: required when `type` is `bond`; the bond (link-aggregation) settings:
+  - `mode`: bonding mode — one of `balance-rr`, `active-backup`, `balance-xor`,
+    `broadcast`, `802.3ad` (LACP), `balance-tlb`, or `balance-alb`
+  - `ports`: list of member interface names enslaved to the bond (at least one;
+    duplicates and the bond's own name are rejected). Members listed here are
+    enslaved by nmstate; they do not need their own entry under `interfaces`.
+  - `miimon`: optional MII link-monitoring interval in milliseconds
+    (`0`–`4294967295`). Omitting it leaves it untouched.
+  - `primary`: optional preferred member for failover-style modes
+    (`active-backup`, `balance-tlb`, `balance-alb`); must be one of `ports`.
 
 A VLAN interface tags traffic on its `base_interface`; that base interface must
 exist and be NetworkManager-managed.
@@ -333,6 +343,25 @@ exist and be NetworkManager-managed.
   "ip_address": "192.168.100.10",
   "subnet": "192.168.100.0/24",
   "vlan": { "base_interface": "eth0", "id": 100 }
+}
+```
+
+A two-NIC active/backup bond with MII link monitoring — the declarative
+equivalent of creating a `bond0` connection in NetworkManager with `eth1` and
+`eth2` enslaved as members, `eth1` preferred as the active link:
+
+```json
+{
+  "name": "bond0",
+  "type": "bond",
+  "ip_address": "192.168.1.50",
+  "subnet": "192.168.1.0/24",
+  "bond": {
+    "mode": "active-backup",
+    "ports": ["eth1", "eth2"],
+    "miimon": 100,
+    "primary": "eth1"
+  }
 }
 ```
 

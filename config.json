@@ -55,6 +55,18 @@
       "name": "eth1",
       "ipv4_method": "dhcp",
       "ipv6_method": "disabled"
+    },
+    {
+      "name": "bond0",
+      "type": "bond",
+      "ip_address": "192.168.1.50",
+      "subnet": "192.168.1.0/24",
+      "bond": {
+        "mode": "active-backup",
+        "ports": ["eth2", "eth3"],
+        "miimon": 100,
+        "primary": "eth2"
+      }
     }
   ],
   "routes": [

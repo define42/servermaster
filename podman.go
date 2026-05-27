@@ -31,15 +31,26 @@ const (
 var podmanSocketPath = "/run/podman/podman.sock"
 
 type containerSpec struct {
-	Name          string            `json:"name,omitempty"`
-	Image         string            `json:"image"`
-	User          string            `json:"user,omitempty"`
-	Env           map[string]string `json:"env,omitempty"`
-	Command       []string          `json:"command,omitempty"`
-	PortMappings  []portMapping     `json:"portmappings,omitempty"`
-	Mounts        []mount           `json:"mounts,omitempty"`
-	RestartPolicy string            `json:"restart_policy,omitempty"`
-	Labels        map[string]string `json:"labels,omitempty"`
+	Name               string            `json:"name,omitempty"`
+	Image              string            `json:"image"`
+	User               string            `json:"user,omitempty"`
+	Env                map[string]string `json:"env,omitempty"`
+	Command            []string          `json:"command,omitempty"`
+	PortMappings       []portMapping     `json:"portmappings,omitempty"`
+	Mounts             []mount           `json:"mounts,omitempty"`
+	RestartPolicy      string            `json:"restart_policy,omitempty"`
+	Labels             map[string]string `json:"labels,omitempty"`
+	Netns              *namespace        `json:"netns,omitempty"`
+	ReadOnlyFilesystem bool              `json:"read_only_filesystem,omitempty"`
+	CapAdd             []string          `json:"cap_add,omitempty"`
+	CapDrop            []string          `json:"cap_drop,omitempty"`
+}
+
+// namespace mirrors Podman specgen's Namespace type: nsmode names the
+// namespace mode (for example "host" for the host's network namespace).
+type namespace struct {
+	NSMode string `json:"nsmode"`
+	Value  string `json:"value,omitempty"`
 }
 
 type portMapping struct {
@@ -219,49 +230,68 @@ func createSpec(c ContainerConfig) (*containerSpec, error) {
 	}
 
 	for _, p := range c.Ports {
-		proto := p.Protocol
-		if proto == "" {
-			proto = "tcp"
-		}
-
-		// validateConfig (run before any reconcile) guarantees both ports are in
-		// 1-65535, so neither uint16 conversion can overflow.
-		hostPort := uint16(p.HostPort)           //nolint:gosec // bounded to 1-65535 by validateConfig.
-		containerPort := uint16(p.ContainerPort) //nolint:gosec // bounded to 1-65535 by validateConfig.
-		s.PortMappings = append(s.PortMappings, portMapping{
-			HostIP:        p.HostIP,
-			HostPort:      hostPort,
-			ContainerPort: containerPort,
-			Protocol:      proto,
-		})
+		s.PortMappings = append(s.PortMappings, portMappingFromConfig(p))
 	}
 
 	for _, v := range c.Volumes {
-		options := []string{"rbind"}
-
-		if v.ReadOnly {
-			options = append(options, "ro")
-		} else {
-			options = append(options, "rw")
-		}
-
-		if relabel := strings.TrimSpace(v.SELinux); relabel != "" {
-			options = append(options, relabel)
-		}
-
-		s.Mounts = append(s.Mounts, mount{
-			Type:        "bind",
-			Source:      v.HostPath,
-			Destination: v.ContainerPath,
-			Options:     options,
-		})
+		s.Mounts = append(s.Mounts, mountFromVolume(v))
 	}
 
 	if c.Restart != "" {
 		s.RestartPolicy = c.Restart
 	}
 
+	applyRuntimeOptions(s, c)
+
 	return s, nil
+}
+
+func portMappingFromConfig(p PortConfig) portMapping {
+	proto := p.Protocol
+	if proto == "" {
+		proto = "tcp"
+	}
+	// validateConfig (run before any reconcile) guarantees both ports are in
+	// 1-65535, so neither uint16 conversion can overflow.
+	hostPort := uint16(p.HostPort)           //nolint:gosec // bounded to 1-65535 by validateConfig.
+	containerPort := uint16(p.ContainerPort) //nolint:gosec // bounded to 1-65535 by validateConfig.
+	return portMapping{
+		HostIP:        p.HostIP,
+		HostPort:      hostPort,
+		ContainerPort: containerPort,
+		Protocol:      proto,
+	}
+}
+
+func mountFromVolume(v VolumeConfig) mount {
+	options := []string{"rbind"}
+	if v.ReadOnly {
+		options = append(options, "ro")
+	} else {
+		options = append(options, "rw")
+	}
+	if relabel := strings.TrimSpace(v.SELinux); relabel != "" {
+		options = append(options, relabel)
+	}
+	return mount{
+		Type:        "bind",
+		Source:      v.HostPath,
+		Destination: v.ContainerPath,
+		Options:     options,
+	}
+}
+
+func applyRuntimeOptions(s *containerSpec, c ContainerConfig) {
+	if mode := strings.TrimSpace(c.NetworkMode); mode != "" {
+		s.Netns = &namespace{NSMode: mode}
+	}
+	s.ReadOnlyFilesystem = c.ReadOnly
+	if len(c.CapAdd) > 0 {
+		s.CapAdd = append([]string(nil), c.CapAdd...)
+	}
+	if len(c.CapDrop) > 0 {
+		s.CapDrop = append([]string(nil), c.CapDrop...)
+	}
 }
 
 // imageExists reports whether an image reference is already present in local

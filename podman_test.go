@@ -707,7 +707,11 @@ func TestCreateSpec(t *testing.T) {
 			{HostPath: "/var/data/web", ContainerPath: "/usr/share/nginx/html", ReadOnly: true, SELinux: "Z"},
 			{HostPath: "/var/data/cache", ContainerPath: "/cache", ReadOnly: false},
 		},
-		Restart: "always",
+		Restart:     "always",
+		NetworkMode: "host",
+		ReadOnly:    true,
+		CapAdd:      []string{"CAP_NET_ADMIN"},
+		CapDrop:     []string{"CAP_SYS_ADMIN"},
 	}
 
 	spec, err := createSpec(c)
@@ -741,6 +745,40 @@ func TestCreateSpec(t *testing.T) {
 
 	if spec.RestartPolicy != "always" {
 		t.Fatalf("restart policy = %q, want always", spec.RestartPolicy)
+	}
+
+	checkRuntimeOptions(t, spec)
+}
+
+func checkRuntimeOptions(t *testing.T, spec *containerSpec) {
+	t.Helper()
+	if spec.Netns == nil || spec.Netns.NSMode != "host" {
+		t.Fatalf("netns = %+v, want nsmode=host", spec.Netns)
+	}
+	if !spec.ReadOnlyFilesystem {
+		t.Fatalf("read_only_filesystem = false, want true")
+	}
+	if !reflect.DeepEqual(spec.CapAdd, []string{"CAP_NET_ADMIN"}) {
+		t.Fatalf("cap_add = %v, want [CAP_NET_ADMIN]", spec.CapAdd)
+	}
+	if !reflect.DeepEqual(spec.CapDrop, []string{"CAP_SYS_ADMIN"}) {
+		t.Fatalf("cap_drop = %v, want [CAP_SYS_ADMIN]", spec.CapDrop)
+	}
+}
+
+func TestCreateSpecDefaults(t *testing.T) {
+	spec, err := createSpec(ContainerConfig{Name: "x", Image: "busybox"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if spec.Netns != nil {
+		t.Fatalf("netns should be nil when network_mode is unset, got %+v", spec.Netns)
+	}
+	if spec.ReadOnlyFilesystem {
+		t.Fatalf("read_only_filesystem should default to false")
+	}
+	if spec.CapAdd != nil || spec.CapDrop != nil {
+		t.Fatalf("capabilities should default to nil, got add=%v drop=%v", spec.CapAdd, spec.CapDrop)
 	}
 }
 
